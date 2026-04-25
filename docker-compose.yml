@@ -1,0 +1,27 @@
+services:
+  gtfs-api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persist pipeline outputs across container restarts
+      - gtfs-outputs:/app/outputs
+      - gtfs-logs:/app/logs
+    environment:
+      # Override any config setting via env vars
+      API_HOST: "0.0.0.0"
+      API_PORT: "8000"
+      API_WORKERS: "1"          # Use 1 worker inside Docker (avoids fork issues)
+      AUTO_REMEDIATE_ENABLED: "false"
+      # GTFS_ALL_FEED_URL: ""   # Uncomment to override the default TFI URL
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  gtfs-outputs:
+  gtfs-logs:

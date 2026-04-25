@@ -1,0 +1,905 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Irish GTFS Analytics</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    .tab-active { border-bottom: 2px solid #16a34a; color: #16a34a; font-weight: 600; }
+    .log-box { font-family: monospace; font-size: 12px; line-height: 1.6; }
+    .log-INFO    { color: #d1fae5; }
+    .log-WARNING { color: #fde68a; }
+    .log-ERROR   { color: #fca5a5; }
+    .log-DEBUG   { color: #6b7280; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spin { animation: spin .7s linear infinite; display:inline-block; }
+    @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:.4} }
+    .pulse-dot { animation: pulse-dot 1.5s ease-in-out infinite; }
+  </style>
+</head>
+<body class="bg-gray-50 text-gray-800 font-sans">
+
+<!-- Top nav -->
+<header class="bg-white border-b border-gray-200 sticky top-0 z-10 shadow-sm">
+  <div class="max-w-7xl mx-auto px-6 flex items-center justify-between h-14">
+    <div class="flex items-center gap-2">
+      <span class="text-xl">🚌</span>
+      <span class="font-bold text-gray-900">Irish GTFS Analytics</span>
+    </div>
+    <div class="flex items-center gap-3">
+      <span id="pipeline-running-indicator" class="hidden text-xs text-amber-600 font-medium flex items-center gap-1">
+        <span class="pulse-dot w-2 h-2 rounded-full bg-amber-400 inline-block"></span> Pipeline running…
+        <button onclick="showTab('pipeline')" class="underline">View</button>
+      </span>
+      <div id="health-badge" class="text-xs px-3 py-1 rounded-full bg-gray-100 text-gray-500">checking…</div>
+    </div>
+  </div>
+</header>
+
+<!-- Tab bar -->
+<div class="bg-white border-b border-gray-200">
+  <div class="max-w-7xl mx-auto px-6 flex gap-1 overflow-x-auto">
+    <button onclick="showTab('overview')"   id="tab-overview"   class="tab-btn whitespace-nowrap px-4 py-3 text-sm text-gray-500 tab-active">Overview</button>
+    <button onclick="showTab('operators')"  id="tab-operators"  class="tab-btn whitespace-nowrap px-4 py-3 text-sm text-gray-500">Operators</button>
+    <button onclick="showTab('routes')"     id="tab-routes"     class="tab-btn whitespace-nowrap px-4 py-3 text-sm text-gray-500">Routes</button>
+    <button onclick="showTab('validation')" id="tab-validation" class="tab-btn whitespace-nowrap px-4 py-3 text-sm text-gray-500">Validation</button>
+    <button onclick="showTab('rules')"      id="tab-rules"      class="tab-btn whitespace-nowrap px-4 py-3 text-sm text-gray-500">Rules</button>
+    <button onclick="showTab('monitoring')" id="tab-monitoring" class="tab-btn whitespace-nowrap px-4 py-3 text-sm text-gray-500">Monitoring</button>
+    <button onclick="showTab('pipeline')"   id="tab-pipeline"   class="tab-btn whitespace-nowrap px-4 py-3 text-sm text-gray-500">Pipeline</button>
+  </div>
+</div>
+
+<main class="max-w-7xl mx-auto px-6 py-8">
+
+  <!-- ─── OVERVIEW ──────────────────────────────────────────── -->
+  <div id="pane-overview">
+    <!-- KPI cards -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+      <div class="bg-white rounded-xl shadow-sm p-5 border border-gray-100">
+        <p class="text-xs text-gray-500 uppercase tracking-wide mb-1">Routes</p>
+        <p id="kpi-routes" class="text-3xl font-bold text-gray-900">—</p>
+      </div>
+      <div class="bg-white rounded-xl shadow-sm p-5 border border-gray-100">
+        <p class="text-xs text-gray-500 uppercase tracking-wide mb-1">Stops</p>
+        <p id="kpi-stops" class="text-3xl font-bold text-gray-900">—</p>
+      </div>
+      <div class="bg-white rounded-xl shadow-sm p-5 border border-gray-100">
+        <p class="text-xs text-gray-500 uppercase tracking-wide mb-1">Operators</p>
+        <p id="kpi-operators" class="text-3xl font-bold text-gray-900">—</p>
+      </div>
+      <div class="bg-white rounded-xl shadow-sm p-5 border border-gray-100">
+        <p class="text-xs text-gray-500 uppercase tracking-wide mb-1">Data Quality</p>
+        <p id="kpi-quality" class="text-3xl font-bold text-gray-900">—</p>
+        <p id="kpi-quality-sub" class="text-xs text-gray-400 mt-1"></p>
+      </div>
+    </div>
+
+    <!-- Charts row -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+      <div class="bg-white rounded-xl shadow-sm p-6 border border-gray-100">
+        <h3 class="text-sm font-semibold text-gray-700 mb-4">Routes by Transport Type</h3>
+        <div class="relative h-56"><canvas id="chart-route-types"></canvas></div>
+      </div>
+      <div class="bg-white rounded-xl shadow-sm p-6 border border-gray-100">
+        <h3 class="text-sm font-semibold text-gray-700 mb-4">Top 10 Busiest Stops</h3>
+        <div class="relative h-56"><canvas id="chart-top-stops"></canvas></div>
+      </div>
+    </div>
+
+    <!-- Validation summary row -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+      <div class="bg-white rounded-xl shadow-sm p-6 border border-gray-100">
+        <h3 class="text-sm font-semibold text-gray-700 mb-4">Violations by Severity</h3>
+        <div class="relative h-48"><canvas id="chart-sev-overview"></canvas></div>
+      </div>
+      <div class="bg-white rounded-xl shadow-sm p-6 border border-gray-100">
+        <h3 class="text-sm font-semibold text-gray-700 mb-1">Top Issues</h3>
+        <p class="text-xs text-gray-400 mb-3">Rules with the most violations</p>
+        <div id="top-issues-list" class="space-y-2 text-sm"></div>
+      </div>
+    </div>
+
+    <div id="no-data-banner" class="hidden mt-6 bg-amber-50 border border-amber-200 rounded-xl p-6 text-center">
+      <p class="text-amber-800 font-medium">No pipeline data found.</p>
+      <p class="text-amber-700 text-sm mt-1">Go to the <button onclick="showTab('pipeline')" class="underline font-medium">Pipeline tab</button> to run the pipeline, or wait — it runs automatically on startup when no data exists.</p>
+    </div>
+  </div>
+
+  <!-- ─── OPERATORS ─────────────────────────────────────────── -->
+  <div id="pane-operators" class="hidden">
+    <h2 class="text-lg font-semibold mb-4">Operator Breakdown</h2>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+      <div class="bg-white rounded-xl shadow-sm p-6 border border-gray-100">
+        <h3 class="text-sm font-semibold text-gray-700 mb-4">Routes per Operator</h3>
+        <div class="relative h-64"><canvas id="chart-op-routes"></canvas></div>
+      </div>
+      <div class="bg-white rounded-xl shadow-sm p-6 border border-gray-100">
+        <h3 class="text-sm font-semibold text-gray-700 mb-4">Trips per Operator</h3>
+        <div class="relative h-64"><canvas id="chart-op-trips"></canvas></div>
+      </div>
+    </div>
+    <div class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead class="bg-gray-50 text-xs uppercase text-gray-500">
+            <tr>
+              <th class="px-4 py-3 text-left">Operator</th>
+              <th class="px-4 py-3 text-right">Routes</th>
+              <th class="px-4 py-3 text-right" title="Total scheduled trips across all routes">Scheduled Trips</th>
+              <th class="px-4 py-3 text-right" title="Sum of calendar days each service runs — higher means more frequent/year-round coverage">Active Service Days</th>
+            </tr>
+          </thead>
+          <tbody id="operators-tbody" class="divide-y divide-gray-100">
+            <tr><td colspan="4" class="px-4 py-8 text-center text-gray-400">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── ROUTES ────────────────────────────────────────────── -->
+  <div id="pane-routes" class="hidden">
+    <div class="flex items-center justify-between mb-4">
+      <div>
+        <h2 class="text-lg font-semibold">Routes <span id="routes-count" class="text-sm font-normal text-gray-400"></span></h2>
+        <p class="text-xs text-gray-400 mt-0.5">Scheduled Trips = total trips in the timetable &nbsp;·&nbsp; Days Operating = span of the schedule in calendar days</p>
+      </div>
+      <input id="route-search" oninput="filterTable('route-search','routes-tbody')"
+        placeholder="Search routes…"
+        class="border border-gray-200 rounded-lg px-3 py-1.5 text-sm w-56 focus:outline-none focus:ring-2 focus:ring-green-500" />
+    </div>
+    <div class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead class="bg-gray-50 text-xs uppercase text-gray-500">
+            <tr>
+              <th class="px-4 py-3 text-left">Number</th>
+              <th class="px-4 py-3 text-left">Route Name</th>
+              <th class="px-4 py-3 text-left">Operator</th>
+              <th class="px-4 py-3 text-left">Mode</th>
+              <th class="px-4 py-3 text-right" title="Total scheduled trips in the timetable">Trips / Week</th>
+              <th class="px-4 py-3 text-right" title="How many calendar days this route runs across its full schedule period">Schedule Span</th>
+            </tr>
+          </thead>
+          <tbody id="routes-tbody" class="divide-y divide-gray-100">
+            <tr><td colspan="7" class="px-4 py-8 text-center text-gray-400">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── VALIDATION ───────────────────────────────────────── -->
+  <div id="pane-validation" class="hidden">
+    <!-- Severity counts -->
+    <div class="grid grid-cols-3 gap-4 mb-6">
+      <div class="bg-red-50 border border-red-100 rounded-xl p-4">
+        <p class="text-xs text-red-500 uppercase tracking-wide mb-1">Critical violations</p>
+        <p id="val-critical" class="text-2xl font-bold text-red-700">—</p>
+        <p class="text-xs text-red-400 mt-1">Records quarantined</p>
+      </div>
+      <div class="bg-amber-50 border border-amber-100 rounded-xl p-4">
+        <p class="text-xs text-amber-500 uppercase tracking-wide mb-1">Warnings</p>
+        <p id="val-warning" class="text-2xl font-bold text-amber-700">—</p>
+        <p class="text-xs text-amber-400 mt-1">Records flagged</p>
+      </div>
+      <div class="bg-blue-50 border border-blue-100 rounded-xl p-4">
+        <p class="text-xs text-blue-500 uppercase tracking-wide mb-1">Info</p>
+        <p id="val-info" class="text-2xl font-bold text-blue-700">—</p>
+        <p class="text-xs text-blue-400 mt-1">Informational</p>
+      </div>
+    </div>
+    <!-- Charts -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+      <div class="bg-white rounded-xl shadow-sm p-6 border border-gray-100">
+        <h3 class="text-sm font-semibold text-gray-700 mb-4">Violations by Rule (top 15)</h3>
+        <div class="relative h-72"><canvas id="chart-violations"></canvas></div>
+      </div>
+      <div class="bg-white rounded-xl shadow-sm p-6 border border-gray-100">
+        <h3 class="text-sm font-semibold text-gray-700 mb-4">Violations by Source File</h3>
+        <div class="relative h-72"><canvas id="chart-violations-file"></canvas></div>
+      </div>
+    </div>
+    <!-- Full table -->
+    <div class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead class="bg-gray-50 text-xs uppercase text-gray-500">
+            <tr>
+              <th class="px-4 py-3 text-left">Rule</th>
+              <th class="px-4 py-3 text-left">Description</th>
+              <th class="px-4 py-3 text-left">File</th>
+              <th class="px-4 py-3 text-left">Severity</th>
+              <th class="px-4 py-3 text-right">Violations</th>
+              <th class="px-4 py-3 text-right">% of Rows</th>
+            </tr>
+          </thead>
+          <tbody id="validation-tbody" class="divide-y divide-gray-100">
+            <tr><td colspan="6" class="px-4 py-8 text-center text-gray-400">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── RULES ────────────────────────────────────────────── -->
+  <div id="pane-rules" class="hidden">
+    <div class="flex flex-col md:flex-row md:items-center justify-between gap-3 mb-4">
+      <div>
+        <h2 class="text-lg font-semibold">Validation Rules</h2>
+        <p class="text-sm text-gray-500 mt-0.5">Toggle rules on/off — changes take effect on the next pipeline run.</p>
+      </div>
+      <div class="flex gap-2 flex-wrap">
+        <select id="rules-filter-sev" onchange="filterRules()"
+          class="border border-gray-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500">
+          <option value="">All severities</option>
+          <option value="CRITICAL">Critical</option>
+          <option value="WARNING">Warning</option>
+          <option value="INFO">Info</option>
+        </select>
+        <select id="rules-filter-file" onchange="filterRules()"
+          class="border border-gray-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500">
+          <option value="">All files</option>
+        </select>
+      </div>
+    </div>
+    <div id="rules-stats" class="flex gap-2 flex-wrap mb-4 text-sm text-gray-600"></div>
+    <div class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead class="bg-gray-50 text-xs uppercase text-gray-500">
+            <tr>
+              <th class="px-4 py-3 text-left w-28">Rule</th>
+              <th class="px-4 py-3 text-left">Description</th>
+              <th class="px-4 py-3 text-left w-36">Source File</th>
+              <th class="px-4 py-3 text-left w-24">Severity</th>
+              <th class="px-4 py-3 text-left w-32">Cross-file deps</th>
+              <th class="px-4 py-3 text-right w-24">Last run</th>
+              <th class="px-4 py-3 text-center w-20">Enabled</th>
+            </tr>
+          </thead>
+          <tbody id="rules-tbody" class="divide-y divide-gray-100">
+            <tr><td colspan="7" class="px-4 py-8 text-center text-gray-400">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── MONITORING ───────────────────────────────────────── -->
+  <div id="pane-monitoring" class="hidden">
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+      <div class="bg-white rounded-xl shadow-sm p-5 border border-gray-100">
+        <p class="text-xs text-gray-500 uppercase tracking-wide mb-1">Quality Score</p>
+        <p id="mon-quality" class="text-3xl font-bold text-gray-900">—</p>
+      </div>
+      <div class="bg-white rounded-xl shadow-sm p-5 border border-gray-100">
+        <p class="text-xs text-gray-500 uppercase tracking-wide mb-1">Total Records</p>
+        <p id="mon-records" class="text-3xl font-bold text-gray-900">—</p>
+      </div>
+      <div class="bg-white rounded-xl shadow-sm p-5 border border-gray-100">
+        <p class="text-xs text-gray-500 uppercase tracking-wide mb-1">Critical Violations</p>
+        <p id="mon-critical" class="text-3xl font-bold text-red-600">—</p>
+      </div>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+      <div class="bg-white rounded-xl shadow-sm p-6 border border-gray-100">
+        <h3 class="text-sm font-semibold text-gray-700 mb-4">Latest Ingestion Metrics</h3>
+        <dl id="monitoring-metrics" class="space-y-2 text-sm">
+          <dd class="text-gray-400">Loading…</dd>
+        </dl>
+      </div>
+      <div class="bg-white rounded-xl shadow-sm p-6 border border-gray-100">
+        <h3 class="text-sm font-semibold text-gray-700 mb-4">Active Alerts</h3>
+        <ul id="alerts-list" class="space-y-2 text-sm">
+          <li class="text-gray-400">Loading…</li>
+        </ul>
+      </div>
+    </div>
+    <!-- Data freshness from validation summary -->
+    <div class="mt-6 bg-white rounded-xl shadow-sm p-6 border border-gray-100">
+      <h3 class="text-sm font-semibold text-gray-700 mb-3">Data Coverage by File</h3>
+      <div id="file-coverage" class="space-y-2 text-sm text-gray-400">Loading…</div>
+    </div>
+  </div>
+
+  <!-- ─── PIPELINE ─────────────────────────────────────────── -->
+  <div id="pane-pipeline" class="hidden">
+    <div class="bg-white rounded-xl shadow-sm p-6 border border-gray-100 mb-6">
+      <div class="flex flex-col md:flex-row md:items-start justify-between gap-4">
+        <div>
+          <h2 class="text-lg font-semibold">Pipeline Runner</h2>
+          <p class="text-sm text-gray-500 mt-1">Downloads the live TFI GTFS feed, validates, cleans, and builds analytics tables.</p>
+          <p id="schedule-info" class="text-xs text-gray-400 mt-2">Next scheduled run: <span id="next-run-time">loading…</span></p>
+        </div>
+        <div class="flex items-center gap-3 flex-shrink-0">
+          <div id="pipeline-status-pill" class="text-xs px-3 py-1 rounded-full bg-gray-100 text-gray-500">Idle</div>
+          <button id="run-btn" onclick="runPipeline()"
+            class="bg-green-600 hover:bg-green-700 text-white text-sm font-medium px-5 py-2 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+            ▶ Run Pipeline
+          </button>
+        </div>
+      </div>
+
+      <!-- Progress steps -->
+      <div id="pipeline-steps" class="mt-6 grid grid-cols-4 md:grid-cols-7 gap-2 text-xs text-center hidden">
+        <div id="step-bronze"      class="step rounded-lg p-2 bg-gray-50 text-gray-400">Bronze</div>
+        <div id="step-validation"  class="step rounded-lg p-2 bg-gray-50 text-gray-400">Validation</div>
+        <div id="step-silver"      class="step rounded-lg p-2 bg-gray-50 text-gray-400">Silver</div>
+        <div id="step-gold"        class="step rounded-lg p-2 bg-gray-50 text-gray-400">Gold</div>
+        <div id="step-profiling"   class="step rounded-lg p-2 bg-gray-50 text-gray-400">Profiling</div>
+        <div id="step-remediation" class="step rounded-lg p-2 bg-gray-50 text-gray-400">Remediation</div>
+        <div id="step-monitoring"  class="step rounded-lg p-2 bg-gray-50 text-gray-400">Monitoring</div>
+      </div>
+    </div>
+
+    <!-- Log stream -->
+    <div class="bg-gray-900 rounded-xl border border-gray-700 overflow-hidden">
+      <div class="flex items-center justify-between px-4 py-2 bg-gray-800 border-b border-gray-700">
+        <span class="text-xs text-gray-400 font-mono">Pipeline Log</span>
+        <div class="flex gap-3">
+          <label class="flex items-center gap-1 text-xs text-gray-400 cursor-pointer">
+            <input type="checkbox" id="autoscroll-cb" checked class="accent-green-500" />
+            Auto-scroll
+          </label>
+          <button onclick="clearLog()" class="text-xs text-gray-400 hover:text-white">Clear</button>
+        </div>
+      </div>
+      <div id="log-box" class="log-box bg-gray-900 text-gray-300 p-4 h-96 overflow-y-auto">
+        <span class="text-gray-500">Waiting for pipeline run…</span>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<script>
+// ── Tab navigation ─────────────────────────────────────────────
+const TABS = ['overview','operators','routes','validation','rules','monitoring','pipeline'];
+const loaded = { overview: true };
+
+function showTab(name) {
+  TABS.forEach(t => {
+    document.getElementById('pane-' + t).classList.toggle('hidden', t !== name);
+    document.getElementById('tab-' + t).classList.toggle('tab-active', t === name);
+  });
+  if (!loaded[name]) {
+    loaded[name] = true;
+    if (name === 'operators')  loadOperators();
+    if (name === 'routes')     loadRoutes();
+    if (name === 'validation') loadValidation();
+    if (name === 'rules')      loadRules();
+    if (name === 'monitoring') loadMonitoring();
+    if (name === 'pipeline')   loadSchedule();
+  }
+}
+
+// ── Helpers ────────────────────────────────────────────────────
+async function api(path, opts) {
+  try {
+    const r = await fetch(path, opts);
+    if (!r.ok) return null;
+    const j = await r.json();
+    return j.data !== undefined ? j.data : j;
+  } catch { return null; }
+}
+
+function filterTable(inputId, tbodyId) {
+  const q = document.getElementById(inputId).value.toLowerCase();
+  document.querySelectorAll('#' + tbodyId + ' tr').forEach(tr => {
+    tr.style.display = tr.textContent.toLowerCase().includes(q) ? '' : 'none';
+  });
+}
+
+const ROUTE_TYPE = {0:'Tram',1:'Metro',2:'Rail',3:'Bus',4:'Ferry',5:'Cable',6:'Gondola',7:'Funicular',11:'Trolleybus',12:'Monorail'};
+const SEV_CLASS  = {CRITICAL:'bg-red-100 text-red-700', WARNING:'bg-amber-100 text-amber-700', INFO:'bg-blue-100 text-blue-700'};
+const CHART_COLORS = ['#16a34a','#2563eb','#d97706','#dc2626','#7c3aed','#0891b2','#be185d','#ca8a04','#0f766e','#9333ea'];
+
+function destroyChart(id) {
+  const existing = Chart.getChart(id);
+  if (existing) existing.destroy();
+}
+
+// ── Health ─────────────────────────────────────────────────────
+async function loadHealth() {
+  const d = await api('/health');
+  const badge = document.getElementById('health-badge');
+  if (d) { badge.textContent = '● Online'; badge.className = 'text-xs px-3 py-1 rounded-full bg-green-100 text-green-700'; }
+  else   { badge.textContent = '● Offline'; badge.className = 'text-xs px-3 py-1 rounded-full bg-red-100 text-red-700'; }
+}
+
+// ── Overview ───────────────────────────────────────────────────
+async function loadOverview() {
+  const [routes, stops, operators, valSummary] = await Promise.all([
+    api('/stats/route-summary'), api('/stats/stop-activity'),
+    api('/stats/operator-summary'), api('/validation/summary'),
+  ]);
+
+  const hasData = routes?.length || stops?.length;
+  document.getElementById('no-data-banner').classList.toggle('hidden', !!hasData);
+
+  document.getElementById('kpi-routes').textContent    = routes?.length?.toLocaleString()    ?? '—';
+  document.getElementById('kpi-stops').textContent     = stops?.length?.toLocaleString()     ?? '—';
+  document.getElementById('kpi-operators').textContent = operators?.length?.toLocaleString() ?? '—';
+
+  if (valSummary?.length) {
+    const total = valSummary.reduce((s, r) => s + (r.total_rows || 0), 0);
+    const crit  = valSummary.filter(r => r.severity === 'CRITICAL').reduce((s, r) => s + (r.violation_count || 0), 0);
+    const pct   = total > 0 ? (((total - crit) / total) * 100).toFixed(1) : null;
+    document.getElementById('kpi-quality').textContent    = pct ? pct + '%' : '—';
+    document.getElementById('kpi-quality-sub').textContent = pct ? `${crit.toLocaleString()} critical records` : '';
+  }
+
+  // Routes by type doughnut
+  if (routes?.length) {
+    const counts = {};
+    routes.forEach(r => {
+      const l = ROUTE_TYPE[r.route_type] ?? ('Type ' + r.route_type);
+      counts[l] = (counts[l] || 0) + 1;
+    });
+    destroyChart('chart-route-types');
+    new Chart(document.getElementById('chart-route-types'), {
+      type: 'doughnut',
+      data: { labels: Object.keys(counts), datasets: [{ data: Object.values(counts), backgroundColor: CHART_COLORS }] },
+      options: { plugins: { legend: { position: 'right' } }, cutout: '60%' }
+    });
+  }
+
+  // Top 10 stops bar
+  if (stops?.length) {
+    const top = [...stops].sort((a, b) => (b.total_departures || 0) - (a.total_departures || 0)).slice(0, 10);
+    destroyChart('chart-top-stops');
+    new Chart(document.getElementById('chart-top-stops'), {
+      type: 'bar',
+      data: {
+        labels: top.map(s => s.stop_name ?? s.stop_id),
+        datasets: [{ label: 'Departures', data: top.map(s => s.total_departures || 0), backgroundColor: '#16a34a' }]
+      },
+      options: { indexAxis: 'y', plugins: { legend: { display: false } }, scales: { x: { beginAtZero: true } } }
+    });
+  }
+
+  // Severity breakdown
+  if (valSummary?.length) {
+    const bySev = s => valSummary.filter(r => r.severity === s).reduce((n, r) => n + (r.violation_count || 0), 0);
+    const sevData = { Critical: bySev('CRITICAL'), Warning: bySev('WARNING'), Info: bySev('INFO') };
+    destroyChart('chart-sev-overview');
+    new Chart(document.getElementById('chart-sev-overview'), {
+      type: 'doughnut',
+      data: {
+        labels: Object.keys(sevData),
+        datasets: [{ data: Object.values(sevData), backgroundColor: ['#dc2626','#d97706','#3b82f6'] }]
+      },
+      options: { plugins: { legend: { position: 'bottom' } }, cutout: '55%' }
+    });
+
+    // Top issues list
+    const top5 = [...valSummary].sort((a, b) => (b.violation_count || 0) - (a.violation_count || 0)).slice(0, 5);
+    const max = top5[0]?.violation_count || 1;
+    document.getElementById('top-issues-list').innerHTML = top5.map(r => `
+      <div>
+        <div class="flex justify-between mb-0.5">
+          <span class="font-mono text-xs font-semibold text-gray-700">${r.rule_code}</span>
+          <span class="text-xs text-gray-500">${(r.violation_count || 0).toLocaleString()}</span>
+        </div>
+        <div class="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+          <div class="h-full rounded-full ${r.severity === 'CRITICAL' ? 'bg-red-500' : r.severity === 'WARNING' ? 'bg-amber-400' : 'bg-blue-400'}"
+            style="width:${Math.round((r.violation_count / max) * 100)}%"></div>
+        </div>
+        <p class="text-xs text-gray-400 mt-0.5">${r.description}</p>
+      </div>`).join('');
+  }
+}
+
+// ── Operators ──────────────────────────────────────────────────
+async function loadOperators() {
+  const data = await api('/stats/operator-summary');
+  const tbody = document.getElementById('operators-tbody');
+  if (!data?.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="px-4 py-8 text-center text-gray-400">No data — run the pipeline first.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = data.map(o => `
+    <tr class="hover:bg-gray-50">
+      <td class="px-4 py-3 font-medium">${o.agency_name ?? o.agency_id ?? '—'}</td>
+      <td class="px-4 py-3 text-right tabular-nums">${(o.total_routes ?? 0).toLocaleString()}</td>
+      <td class="px-4 py-3 text-right tabular-nums">${(o.total_trips ?? 0).toLocaleString()}</td>
+      <td class="px-4 py-3 text-right tabular-nums">${(o.active_service_days ?? 0).toLocaleString()}</td>
+    </tr>`).join('');
+
+  const names = data.map(o => o.agency_name ?? o.agency_id);
+  destroyChart('chart-op-routes');
+  new Chart(document.getElementById('chart-op-routes'), {
+    type: 'bar',
+    data: { labels: names, datasets: [{ label: 'Routes', data: data.map(o => o.total_routes || 0), backgroundColor: CHART_COLORS }] },
+    options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
+  });
+  destroyChart('chart-op-trips');
+  new Chart(document.getElementById('chart-op-trips'), {
+    type: 'bar',
+    data: { labels: names, datasets: [{ label: 'Trips', data: data.map(o => o.total_trips || 0), backgroundColor: CHART_COLORS }] },
+    options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
+  });
+}
+
+// ── Routes ─────────────────────────────────────────────────────
+async function loadRoutes() {
+  const data = await api('/routes?limit=5000');
+  const tbody = document.getElementById('routes-tbody');
+  if (!data?.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="px-4 py-8 text-center text-gray-400">No data — run the pipeline first.</td></tr>';
+    return;
+  }
+  document.getElementById('routes-count').textContent = `(${data.length.toLocaleString()})`;
+  const maxDays = Math.max(...data.map(r => r.service_days || 0), 1);
+  tbody.innerHTML = data.map(r => {
+    const mode = ROUTE_TYPE[+r.route_type] ?? '—';
+    const modeBadge = {
+      'Bus':'bg-green-100 text-green-700', 'Rail':'bg-blue-100 text-blue-700',
+      'Tram':'bg-purple-100 text-purple-700', 'Ferry':'bg-cyan-100 text-cyan-700',
+      'Metro':'bg-indigo-100 text-indigo-700',
+    };
+    const modeClass = modeBadge[mode] ?? 'bg-gray-100 text-gray-600';
+    const days = r.service_days || 0;
+    const pct  = Math.round((days / maxDays) * 100);
+    const daysLabel = days >= 365 ? 'Year-round' : days >= 180 ? `~${Math.round(days/30)} months` : `${days} days`;
+    return `
+    <tr class="hover:bg-gray-50">
+      <td class="px-4 py-3 font-bold text-gray-800">${r.route_short_name ?? '—'}</td>
+      <td class="px-4 py-3 text-gray-700 max-w-xs truncate" title="${r.route_long_name ?? ''}">${r.route_long_name || r.route_id || '—'}</td>
+      <td class="px-4 py-3 text-gray-600">${r.agency_name ?? '—'}</td>
+      <td class="px-4 py-3"><span class="text-xs px-2 py-0.5 rounded-full font-medium ${modeClass}">${mode}</span></td>
+      <td class="px-4 py-3 text-right tabular-nums font-medium">${(r.total_trips ?? 0).toLocaleString()}</td>
+      <td class="px-4 py-3 text-right">
+        <div class="flex items-center justify-end gap-2">
+          <div class="w-16 h-1.5 bg-gray-100 rounded-full overflow-hidden">
+            <div class="h-full bg-green-400 rounded-full" style="width:${pct}%"></div>
+          </div>
+          <span class="tabular-nums text-xs text-gray-600 w-20 text-right">${daysLabel}</span>
+        </div>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+// ── Validation ─────────────────────────────────────────────────
+async function loadValidation() {
+  const data = await api('/validation/summary');
+  const tbody = document.getElementById('validation-tbody');
+  if (!data?.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="px-4 py-8 text-center text-gray-400">No data — run the pipeline first.</td></tr>';
+    return;
+  }
+
+  const bySev = s => data.filter(r => r.severity === s).reduce((n, r) => n + (r.violation_count || 0), 0);
+  document.getElementById('val-critical').textContent = bySev('CRITICAL').toLocaleString();
+  document.getElementById('val-warning').textContent  = bySev('WARNING').toLocaleString();
+  document.getElementById('val-info').textContent     = bySev('INFO').toLocaleString();
+
+  // Top 15 by rule
+  const top15 = [...data].sort((a, b) => (b.violation_count || 0) - (a.violation_count || 0)).slice(0, 15);
+  destroyChart('chart-violations');
+  new Chart(document.getElementById('chart-violations'), {
+    type: 'bar',
+    data: {
+      labels: top15.map(r => r.rule_code),
+      datasets: [{ label: 'Violations', data: top15.map(r => r.violation_count || 0),
+        backgroundColor: top15.map(r => r.severity === 'CRITICAL' ? '#dc2626' : r.severity === 'WARNING' ? '#d97706' : '#3b82f6') }]
+    },
+    options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
+  });
+
+  // By file
+  const byFile = {};
+  data.forEach(r => { byFile[r.source_file] = (byFile[r.source_file] || 0) + (r.violation_count || 0); });
+  const sortedFiles = Object.entries(byFile).sort((a, b) => b[1] - a[1]);
+  destroyChart('chart-violations-file');
+  new Chart(document.getElementById('chart-violations-file'), {
+    type: 'bar',
+    data: {
+      labels: sortedFiles.map(e => e[0]),
+      datasets: [{ label: 'Violations', data: sortedFiles.map(e => e[1]), backgroundColor: CHART_COLORS }]
+    },
+    options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
+  });
+
+  tbody.innerHTML = data.map(r => `
+    <tr class="hover:bg-gray-50">
+      <td class="px-4 py-3 font-mono text-xs font-semibold">${r.rule_code ?? '—'}</td>
+      <td class="px-4 py-3 text-gray-600">${r.description ?? '—'}</td>
+      <td class="px-4 py-3 text-gray-500 text-xs font-mono">${r.source_file ?? '—'}</td>
+      <td class="px-4 py-3"><span class="text-xs px-2 py-0.5 rounded-full font-medium ${SEV_CLASS[r.severity] || 'bg-gray-100 text-gray-600'}">${r.severity ?? '—'}</span></td>
+      <td class="px-4 py-3 text-right tabular-nums font-medium">${(r.violation_count || 0).toLocaleString()}</td>
+      <td class="px-4 py-3 text-right tabular-nums text-gray-500">${r.violation_pct != null ? r.violation_pct.toFixed(1) + '%' : '—'}</td>
+    </tr>`).join('');
+}
+
+// ── Rules ──────────────────────────────────────────────────────
+let _allRules = [];
+let _ruleViolations = {};
+
+async function loadRules() {
+  const [rules, valSummary] = await Promise.all([api('/rules'), api('/validation/summary')]);
+  _allRules = rules ?? [];
+  // Build violation count lookup
+  (valSummary ?? []).forEach(r => { _ruleViolations[r.rule_code] = r.violation_count || 0; });
+
+  const files = [...new Set(_allRules.map(r => r.source_file))].sort();
+  const sel = document.getElementById('rules-filter-file');
+  sel.innerHTML = '<option value="">All files</option>';
+  files.forEach(f => { const o = document.createElement('option'); o.value = f; o.textContent = f; sel.appendChild(o); });
+  renderRules(_allRules);
+}
+
+function filterRules() {
+  const sev  = document.getElementById('rules-filter-sev').value;
+  const file = document.getElementById('rules-filter-file').value;
+  renderRules(_allRules.filter(r => (!sev || r.severity === sev) && (!file || r.source_file === file)));
+}
+
+function renderRules(rules) {
+  const enabled  = rules.filter(r => r.enabled).length;
+  const disabled = rules.filter(r => !r.enabled).length;
+  document.getElementById('rules-stats').innerHTML = `
+    <span class="bg-green-50 border border-green-200 text-green-700 rounded-lg px-3 py-1">${enabled} enabled</span>
+    <span class="bg-gray-100 border border-gray-200 text-gray-600 rounded-lg px-3 py-1">${disabled} disabled</span>
+    <span class="bg-red-50 border border-red-100 text-red-600 rounded-lg px-3 py-1">${rules.filter(r => r.severity === 'CRITICAL').length} critical</span>
+    <span class="bg-amber-50 border border-amber-100 text-amber-600 rounded-lg px-3 py-1">${rules.filter(r => r.severity === 'WARNING').length} warnings</span>`;
+
+  document.getElementById('rules-tbody').innerHTML = rules.map(r => {
+    const violations = _ruleViolations[r.rule_code];
+    const violCell = violations != null
+      ? `<span class="text-xs font-medium ${violations > 0 ? 'text-red-600' : 'text-green-600'}">${violations.toLocaleString()}</span>`
+      : '<span class="text-xs text-gray-300">—</span>';
+    return `
+    <tr class="hover:bg-gray-50 ${r.enabled ? '' : 'opacity-50'}">
+      <td class="px-4 py-3 font-mono text-xs font-bold text-gray-700">${r.rule_code}</td>
+      <td class="px-4 py-3 text-gray-700">${r.description}</td>
+      <td class="px-4 py-3 text-gray-500 text-xs font-mono">${r.source_file}</td>
+      <td class="px-4 py-3"><span class="text-xs px-2 py-0.5 rounded-full font-medium ${SEV_CLASS[r.severity] || 'bg-gray-100 text-gray-600'}">${r.severity}</span></td>
+      <td class="px-4 py-3 text-gray-500 text-xs">${r.required_files.length ? r.required_files.join(', ') : '—'}</td>
+      <td class="px-4 py-3 text-right">${violCell}</td>
+      <td class="px-4 py-3 text-center">
+        <button onclick="toggleRule('${r.rule_code}', ${r.enabled})"
+          class="w-10 h-6 rounded-full transition-colors ${r.enabled ? 'bg-green-500' : 'bg-gray-300'} relative">
+          <span class="absolute top-0.5 ${r.enabled ? 'right-0.5' : 'left-0.5'} w-5 h-5 bg-white rounded-full shadow transition-all"></span>
+        </button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+async function toggleRule(code, currentlyEnabled) {
+  const action = currentlyEnabled ? 'disable' : 'enable';
+  await fetch(`/rules/${code}/${action}`, { method: 'POST' });
+  const rule = _allRules.find(r => r.rule_code === code);
+  if (rule) rule.enabled = !currentlyEnabled;
+  filterRules();
+}
+
+// ── Monitoring ─────────────────────────────────────────────────
+async function loadMonitoring() {
+  const [latest, alerts, valSummary] = await Promise.all([
+    api('/monitoring/latest'), api('/monitoring/alerts'), api('/validation/summary')
+  ]);
+
+  // KPI cards — fall back to validation summary if monitoring parquet is empty
+  const qualityScore = latest?.quality_score ?? (() => {
+    if (!valSummary?.length) return null;
+    const total = valSummary.reduce((s, r) => s + (r.total_rows || 0), 0);
+    const crit  = valSummary.filter(r => r.severity === 'CRITICAL').reduce((s, r) => s + (r.violation_count || 0), 0);
+    return total > 0 ? ((total - crit) / total * 100) : null;
+  })();
+  const totalRecords = latest?.total_records_ingested ?? valSummary?.reduce((s, r) => {
+    // approximate: max total_rows across all rules for each file
+    const byFile = {};
+    valSummary.forEach(r => { byFile[r.source_file] = Math.max(byFile[r.source_file] || 0, r.total_rows || 0); });
+    return Object.values(byFile).reduce((a, b) => a + b, 0);
+  }, 0);
+  const critViolations = latest?.total_critical_violations
+    ?? valSummary?.filter(r => r.severity === 'CRITICAL').reduce((s, r) => s + (r.violation_count || 0), 0);
+
+  document.getElementById('mon-quality').textContent  = qualityScore != null ? qualityScore.toFixed(1) + '%' : '—';
+  document.getElementById('mon-records').textContent  = totalRecords?.toLocaleString() ?? '—';
+  document.getElementById('mon-critical').textContent = critViolations?.toLocaleString() ?? '—';
+
+  // Metrics detail
+  const metricEl = document.getElementById('monitoring-metrics');
+  if (latest && Object.keys(latest).length) {
+    const rows = [
+      ['Quality Score',       latest.quality_score != null ? latest.quality_score.toFixed(1) + '%' : '—'],
+      ['Total Records',       latest.total_records_ingested?.toLocaleString() ?? '—'],
+      ['Critical Violations', latest.total_critical_violations?.toLocaleString() ?? '—'],
+      ['Ingestion Date',      latest.ingestion_date ?? '—'],
+      ['Feed Stale?',         latest.feed_stale != null ? (latest.feed_stale ? 'Yes ⚠' : 'No ✓') : '—'],
+    ];
+    metricEl.innerHTML = rows.map(([k, v]) => `
+      <div class="flex justify-between border-b border-gray-50 pb-2">
+        <dt class="text-gray-500">${k}</dt><dd class="font-medium">${v}</dd>
+      </div>`).join('');
+  } else if (valSummary?.length) {
+    // Build from validation summary as fallback
+    const ingDate = valSummary[0]?.ingestion_timestamp?.split('T')[0] ?? '—';
+    metricEl.innerHTML = `
+      <div class="flex justify-between border-b border-gray-50 pb-2"><dt class="text-gray-500">Ingestion Date</dt><dd class="font-medium">${ingDate}</dd></div>
+      <div class="flex justify-between border-b border-gray-50 pb-2"><dt class="text-gray-500">Quality Score</dt><dd class="font-medium">${qualityScore != null ? qualityScore.toFixed(1) + '%' : '—'}</dd></div>
+      <p class="text-xs text-gray-400 pt-2">Detailed monitoring metrics will appear after the next pipeline run.</p>`;
+  } else {
+    metricEl.innerHTML = '<dd class="text-gray-400">No data — run the pipeline first.</dd>';
+  }
+
+  // Alerts
+  const alertEl = document.getElementById('alerts-list');
+  if (alerts?.length) {
+    const AC = { WARNING: 'bg-amber-50 text-amber-800 border-amber-200', CRITICAL: 'bg-red-50 text-red-800 border-red-200' };
+    alertEl.innerHTML = alerts.map(a => `<li class="border rounded-lg px-3 py-2 text-xs ${AC[a.severity] || 'bg-gray-50 border-gray-200 text-gray-700'}"><span class="font-semibold">${a.alert_type}</span> — ${a.message}</li>`).join('');
+  } else {
+    alertEl.innerHTML = '<li class="text-green-600 font-medium">✓ No active alerts</li>';
+  }
+
+  // Data coverage by file
+  const coverageEl = document.getElementById('file-coverage');
+  if (valSummary?.length) {
+    const byFile = {};
+    valSummary.forEach(r => {
+      if (!byFile[r.source_file]) byFile[r.source_file] = { total: 0, critical: 0 };
+      byFile[r.source_file].total = Math.max(byFile[r.source_file].total, r.total_rows || 0);
+      if (r.severity === 'CRITICAL') byFile[r.source_file].critical += r.violation_count || 0;
+    });
+    coverageEl.innerHTML = Object.entries(byFile).map(([file, d]) => {
+      const pct = d.total > 0 ? Math.max(0, ((d.total - d.critical) / d.total * 100)) : 100;
+      return `
+        <div class="flex items-center gap-3">
+          <span class="font-mono text-xs w-40 flex-shrink-0 text-gray-600">${file}</span>
+          <div class="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
+            <div class="h-full rounded-full ${pct >= 99 ? 'bg-green-500' : pct >= 90 ? 'bg-amber-400' : 'bg-red-500'}"
+              style="width:${pct.toFixed(1)}%"></div>
+          </div>
+          <span class="text-xs w-24 text-right text-gray-500">${d.total.toLocaleString()} rows · ${pct.toFixed(1)}% clean</span>
+        </div>`;
+    }).join('');
+  } else {
+    coverageEl.innerHTML = '<p class="text-gray-400">No data.</p>';
+  }
+}
+
+// ── Pipeline ───────────────────────────────────────────────────
+let _logIndex = 0;
+let _pollTimer = null;
+
+const STEP_KEYWORDS = {
+  bronze:      ['BRONZE LAYER', 'Ingested '],
+  validation:  ['VALIDATION', 'Running rule:'],
+  silver:      ['SILVER LAYER'],
+  gold:        ['GOLD LAYER'],
+  profiling:   ['PROFILING'],
+  remediation: ['REMEDIATION'],
+  monitoring:  ['MONITORING'],
+};
+
+function stepClass(active, done) {
+  if (done)   return 'bg-green-100 text-green-700 font-semibold';
+  if (active) return 'bg-green-600 text-white font-semibold';
+  return 'bg-gray-50 text-gray-400';
+}
+
+const _doneSteps = new Set();
+let _currentStep = null;
+
+function highlightStep(text) {
+  for (const [step, keywords] of Object.entries(STEP_KEYWORDS)) {
+    if (keywords.some(k => text.includes(k))) {
+      if (_currentStep && _currentStep !== step) _doneSteps.add(_currentStep);
+      _currentStep = step;
+    }
+  }
+  for (const step of Object.keys(STEP_KEYWORDS)) {
+    const el = document.getElementById('step-' + step);
+    if (el) el.className = 'step rounded-lg p-2 ' + stepClass(_currentStep === step, _doneSteps.has(step));
+  }
+}
+
+function appendLog(msg) {
+  const box = document.getElementById('log-box');
+  const line = document.createElement('div');
+  line.className = 'log-' + msg.level;
+  line.textContent = `[${msg.time}] ${msg.logger}: ${msg.text}`;
+  box.appendChild(line);
+  highlightStep(msg.text);
+  if (document.getElementById('autoscroll-cb').checked) box.scrollTop = box.scrollHeight;
+}
+
+function clearLog() {
+  document.getElementById('log-box').innerHTML = '';
+  _logIndex = 0;
+}
+
+function setPipelineStatus(status) {
+  const pill  = document.getElementById('pipeline-status-pill');
+  const btn   = document.getElementById('run-btn');
+  const ind   = document.getElementById('pipeline-running-indicator');
+  const classes = { idle:'bg-gray-100 text-gray-500', running:'bg-yellow-100 text-yellow-700', completed:'bg-green-100 text-green-700', failed:'bg-red-100 text-red-700' };
+  const labels  = { idle:'Idle', running:'⟳ Running…', completed:'✓ Completed', failed:'✕ Failed' };
+  pill.textContent = labels[status] ?? status;
+  pill.className   = 'text-xs px-3 py-1 rounded-full ' + (classes[status] ?? classes.idle);
+  btn.disabled     = (status === 'running');
+  ind.classList.toggle('hidden', status !== 'running');
+}
+
+async function pollMessages() {
+  const r = await fetch('/pipeline/messages?since=' + _logIndex).then(r => r.json()).catch(() => null);
+  if (r) { r.messages.forEach(appendLog); _logIndex = r.next_index; }
+  const s = await fetch('/pipeline/status').then(r => r.json()).catch(() => null);
+  if (s) {
+    setPipelineStatus(s.status);
+    if (s.status === 'running') {
+      _pollTimer = setTimeout(pollMessages, 500);
+    } else {
+      if (_currentStep) _doneSteps.add(_currentStep);
+      for (const step of Object.keys(STEP_KEYWORDS)) {
+        const el = document.getElementById('step-' + step);
+        if (el) el.className = 'step rounded-lg p-2 ' + stepClass(false, _doneSteps.has(step));
+      }
+      if (s.error) {
+        const box = document.getElementById('log-box');
+        const line = document.createElement('div');
+        line.className = 'log-ERROR font-bold';
+        line.textContent = '✕ Pipeline failed: ' + s.error;
+        box.appendChild(line);
+      }
+      if (s.status === 'completed') {
+        // Reload all tabs
+        Object.keys(loaded).forEach(k => { loaded[k] = false; });
+        loaded.pipeline = true;
+        loadOverview();
+      }
+    }
+  }
+}
+
+async function runPipeline() {
+  clearLog();
+  _doneSteps.clear();
+  _currentStep = null;
+  document.getElementById('pipeline-steps').classList.remove('hidden');
+  Object.keys(STEP_KEYWORDS).forEach(s => {
+    const el = document.getElementById('step-' + s);
+    if (el) el.className = 'step rounded-lg p-2 bg-gray-50 text-gray-400';
+  });
+  const result = await fetch('/pipeline/run', { method: 'POST' }).then(r => r.json()).catch(e => ({ error: String(e) }));
+  if (result.error || result.detail) {
+    document.getElementById('log-box').innerHTML = `<span class="log-ERROR">Failed to start: ${result.error ?? result.detail}</span>`;
+    setPipelineStatus('failed');
+    return;
+  }
+  setPipelineStatus('running');
+  _logIndex = 0;
+  pollMessages();
+}
+
+async function loadSchedule() {
+  const s = await api('/pipeline/schedule');
+  if (s?.next_scheduled_run) {
+    const d = new Date(s.next_scheduled_run);
+    document.getElementById('next-run-time').textContent =
+      d.toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' }) + ' (daily)';
+  }
+}
+
+// ── Bootstrap ──────────────────────────────────────────────────
+(async () => {
+  await loadHealth();
+  await loadOverview();
+  // Check if pipeline is already running (e.g. auto-started on boot)
+  const s = await fetch('/pipeline/status').then(r => r.json()).catch(() => null);
+  if (s?.status === 'running') {
+    setPipelineStatus('running');
+    document.getElementById('pipeline-steps').classList.remove('hidden');
+    pollMessages();
+  }
+})();
+</script>
+</body>
+</html>

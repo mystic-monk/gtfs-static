@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gtfs-analytics-platform"
+version = "0.1.0"
+description = "Production-grade Irish GTFS data ingestion, validation, analytics and quality platform"
+authors = [{name = "Data Engineering Team"}]
+requires-python = ">=3.10"
+readme = "README.md"
+license = {text = "MIT"}
+
+[project.optional-dependencies]
+core = [
+    "pandas>=2.0.0",
+    "pyarrow>=12.0.0",
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+]
+api = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "python-multipart>=0.0.6",
+    "aiofiles>=23.0.0",
+]
+dashboard = [
+    "streamlit>=1.28.0",
+    "plotly>=5.17.0",
+    "folium>=0.14.0",
+    "graphviz>=0.20.1",
+]
+etl = [
+    "partridge>=1.1.1",
+    "sqlalchemy>=2.0.0",
+    "psycopg2-binary>=2.9.0",
+]
+validation = [
+    "pandera>=0.18.0",
+    "great-expectations>=0.17.0",
+]
+remediation = [
+    "chardet>=5.2.0",
+]
+monitoring = [
+    "sqlalchemy>=2.0.0",
+]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "black>=23.7.0",
+    "flake8>=6.1.0",
+    "mypy>=1.5.0",
+    "pre-commit>=3.3.0",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "--cov=src --cov-report=html --cov-report=term-missing"

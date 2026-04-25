@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/c/Users/ankush.arya/Dev/gtfs/src/validation/**)",
+      "Read(//c/c/Users/ankush.arya/Dev/gtfs/outputs/**)"
+    ]
+  }
+}
