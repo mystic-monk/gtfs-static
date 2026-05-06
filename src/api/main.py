@@ -3,7 +3,7 @@ FastAPI backend for the Irish GTFS Analytics Platform.
 
 Exposes analytics and quality metrics via REST API endpoints.
 """
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Header
 from fastapi.responses import FileResponse, RedirectResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -67,6 +67,37 @@ _ui_handler = _UILogHandler()
 _ui_handler.setLevel(logging.INFO)
 
 
+# ── Silver table cache (pre-loaded after pipeline, used by timetable endpoint) ──
+_silver_cache: Dict[str, Any] = {"loaded": False, "lock": threading.Lock()}
+
+
+def _load_silver_cache() -> None:
+    """Load the four silver tables needed for timetable generation into memory."""
+    try:
+        silver = settings.SILVER_OUTPUT
+        trips  = sorted(silver.glob("trips_ingestion_date=*.parquet"))
+        st     = sorted(silver.glob("stop_times_ingestion_date=*.parquet"))
+        stops  = sorted(silver.glob("stops_ingestion_date=*.parquet"))
+        routes = sorted(silver.glob("routes_ingestion_date=*.parquet"))
+        cal    = sorted(silver.glob("calendar_ingestion_date=*.parquet"))
+        if not (trips and st and stops and routes):
+            return
+        with _silver_cache["lock"]:
+            _silver_cache["trips"]  = pd.read_parquet(trips[-1])
+            _silver_cache["stops"]  = pd.read_parquet(stops[-1])
+            _silver_cache["routes"] = pd.read_parquet(routes[-1])
+            _silver_cache["cal"]    = pd.read_parquet(cal[-1]) if cal else pd.DataFrame()
+            # stop_times is large — load only needed columns
+            _silver_cache["stop_times"] = pd.read_parquet(
+                st[-1], columns=["trip_id", "stop_id", "stop_sequence", "departure_time"]
+            )
+            _silver_cache["loaded"] = True
+        logger.info("Silver cache loaded for timetable serving")
+        _build_routes_cache()
+    except Exception as e:
+        logger.warning("Failed to load silver cache: %s", e)
+
+
 def _run_pipeline_background() -> None:
     root_logger = logging.getLogger("src")
     root_logger.addHandler(_ui_handler)
@@ -78,6 +109,8 @@ def _run_pipeline_background() -> None:
             _pipeline_state["completed_at"] = datetime.now().isoformat()
             if not results.get("success"):
                 _pipeline_state["error"] = results.get("error", "Unknown error")
+        if results.get("success"):
+            _load_silver_cache()   # pre-warm timetable cache after successful run
     except Exception as e:
         with _pipeline_state["lock"]:
             _pipeline_state["status"] = "failed"
@@ -115,6 +148,9 @@ def _scheduler_loop() -> None:
         sleep_secs = (next_run - now).total_seconds()
         time.sleep(sleep_secs)
         _start_pipeline_if_idle("Scheduled daily pipeline refresh")
+
+# Pre-warm silver cache on startup (non-blocking)
+threading.Thread(target=_load_silver_cache, daemon=True).start()
 
 # Create FastAPI app
 app = FastAPI(
@@ -210,53 +246,178 @@ async def get_operators() -> ApiResponse:
 
 # ============= ROUTES =============
 
+_DOW = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+
+# Module-level route cache — built once from silver, reused on every request
+_routes_cache: Dict[str, Any] = {"df": None, "lock": threading.Lock()}
+
+
+def _build_routes_cache() -> None:
+    """
+    Build the fully-enriched routes DataFrame once and hold it in memory.
+    Called at startup and after every successful pipeline run.
+    """
+    try:
+        parquet_files = list(settings.GOLD_OUTPUT.glob("route_summary.parquet"))
+        if not parquet_files:
+            return
+
+        routes_df = pd.read_parquet(parquet_files[0])
+
+        # Agency names from silver cache (already in memory)
+        with _silver_cache["lock"]:
+            agency_loaded = _silver_cache.get("loaded", False)
+            if agency_loaded and "stops" in _silver_cache:
+                # Rebuild agency map from in-memory silver
+                try:
+                    silver_files = sorted(settings.SILVER_OUTPUT.glob("agency_ingestion_date=*.parquet"))
+                    if silver_files:
+                        ag = pd.read_parquet(silver_files[-1], columns=["agency_id", "agency_name"])
+                        name_map = dict(zip(ag["agency_id"].astype(str), ag["agency_name"].astype(str)))
+                    else:
+                        name_map = {}
+                except Exception:
+                    name_map = {}
+            else:
+                name_map = {}
+
+        if name_map and "agency_name" in routes_df.columns:
+            routes_df["agency_name"] = routes_df["agency_name"].astype(str).map(
+                lambda v: name_map.get(v, v)
+            )
+        if "route_type" in routes_df.columns:
+            routes_df["route_type"] = routes_df["route_type"].fillna(-1).astype(int)
+
+        # Schedule enrichment using in-memory silver cache
+        with _silver_cache["lock"]:
+            if _silver_cache.get("loaded"):
+                trips = _silver_cache["trips"][["trip_id", "route_id", "service_id"]]
+                cal   = _silver_cache["cal"][["service_id"] + [d for d in _DOW if d in _silver_cache["cal"].columns]]
+                st    = _silver_cache["stop_times"][["trip_id", "departure_time"]]
+            else:
+                trips = cal = st = None
+
+        if trips is not None:
+            # Days of week
+            rc = trips[["route_id", "service_id"]].drop_duplicates().merge(cal, on="service_id", how="left")
+            dow_cols = [d for d in _DOW if d in rc.columns]
+            days_df = rc.groupby("route_id")[dow_cols].max().reset_index()
+            for d in dow_cols:
+                days_df[d] = days_df[d].fillna(0).astype(int).astype(bool)
+
+            # First / last departure
+            tt = trips[["trip_id", "route_id"]].merge(st, on="trip_id", how="left").dropna(subset=["departure_time"])
+            parts = tt["departure_time"].astype(str).str.split(":", expand=True)
+            tt["_s"] = pd.to_numeric(parts[0], errors="coerce") * 3600 + pd.to_numeric(parts[1], errors="coerce") * 60
+            tt = tt.dropna(subset=["_s"])
+            idx_min = tt.groupby("route_id")["_s"].idxmin()
+            idx_max = tt.groupby("route_id")["_s"].idxmax()
+            times_df = pd.DataFrame({
+                "route_id":       tt.loc[idx_min, "route_id"].values,
+                "first_departure": tt.loc[idx_min, "departure_time"].values,
+                "last_departure":  tt.loc[idx_max, "departure_time"].values,
+            })
+
+            sched = days_df.merge(times_df, on="route_id", how="left").set_index("route_id")
+            routes_df = routes_df.join(sched, on="route_id", how="left")
+
+        with _routes_cache["lock"]:
+            _routes_cache["df"] = routes_df
+
+        logger.info("Routes cache built: %d routes", len(routes_df))
+    except Exception as e:
+        logger.warning("Failed to build routes cache: %s", e)
+
+
 def _agency_name_map() -> dict:
-    """Build agency_id → agency_name lookup from the latest silver agency parquet."""
+    """Agency id→name map — reads from silver parquet (used by timetable endpoint)."""
     try:
         files = sorted(settings.SILVER_OUTPUT.glob("agency_ingestion_date=*.parquet"))
         if not files:
             return {}
-        import pandas as _pd
-        df = _pd.read_parquet(files[-1], columns=["agency_id", "agency_name"])
+        df = pd.read_parquet(files[-1], columns=["agency_id", "agency_name"])
         return dict(zip(df["agency_id"].astype(str), df["agency_name"].astype(str)))
     except Exception:
         return {}
 
 
+_ROUTES_SORTABLE = {
+    "route_short_name", "route_long_name", "agency_name",
+    "route_type", "total_trips", "first_departure",
+}
+
+
 @app.get("/routes")
 async def get_routes(
     operator_id: Optional[str] = None,
-    limit: int = Query(5000, ge=1, le=20000),
+    search: Optional[str] = None,
+    limit: int = Query(100, ge=1, le=5000),
     offset: int = Query(0, ge=0),
+    sort_by: Optional[str] = Query(None),
+    sort_dir: str = Query("asc"),
 ) -> ApiResponse:
-    """Get routes with pagination and optional operator filter."""
+    """Get routes from the in-memory cache with optional search, sort, and pagination."""
     try:
-        parquet_files = list(settings.GOLD_OUTPUT.glob("route_summary.parquet"))
+        with _routes_cache["lock"]:
+            routes_df = _routes_cache.get("df")
 
-        if not parquet_files:
-            return ApiResponse(status="success", data=[], record_count=0)
-
-        routes_df = read_parquet(parquet_files[0])
-
-        # Resolve numeric agency_id → human-readable name at query time
-        name_map = _agency_name_map()
-        if name_map and "agency_name" in routes_df.columns:
-            routes_df["agency_name"] = (
-                routes_df["agency_name"].astype(str)
-                .map(lambda v: name_map.get(v, v))   # replace if found, keep otherwise
-            )
-
-        # Ensure route_type is an integer so JS can look it up
-        if "route_type" in routes_df.columns:
-            routes_df["route_type"] = (
-                routes_df["route_type"].fillna(-1).astype(int)
-            )
+        if routes_df is None:
+            pf = list(settings.GOLD_OUTPUT.glob("route_summary.parquet"))
+            if not pf:
+                return ApiResponse(status="success", data=[], record_count=0)
+            routes_df = pd.read_parquet(pf[0])
 
         if operator_id:
             routes_df = routes_df[routes_df["agency_name"] == operator_id]
 
-        routes = routes_df.iloc[offset:offset + limit].to_dict("records")
-        return ApiResponse(status="success", data=routes, record_count=len(routes))
+        if search:
+            q = search.lower()
+            mask = (
+                routes_df["route_short_name"].astype(str).str.lower().str.contains(q, na=False)
+                | routes_df["route_long_name"].astype(str).str.lower().str.contains(q, na=False)
+                | routes_df["agency_name"].astype(str).str.lower().str.contains(q, na=False)
+            )
+            routes_df = routes_df[mask]
+
+        # Sorting
+        if sort_by and sort_by in _ROUTES_SORTABLE and sort_by in routes_df.columns:
+            asc = sort_dir.lower() != "desc"
+            try:
+                if sort_by == "route_short_name":
+                    # Natural numeric sort: "1","2","10" before "X1","N22"
+                    routes_df = routes_df.copy()
+                    routes_df["_sk"] = pd.to_numeric(routes_df["route_short_name"], errors="coerce")
+                    routes_df = routes_df.sort_values(
+                        ["_sk", "route_short_name"], ascending=[asc, asc], na_position="last"
+                    ).drop(columns=["_sk"])
+                elif sort_by == "first_departure":
+                    # Sort by time-of-day (HH:MM:SS string → seconds)
+                    routes_df = routes_df.copy()
+                    parts = routes_df["first_departure"].fillna("").astype(str).str.split(":", expand=True)
+                    secs = (
+                        pd.to_numeric(parts.get(0, pd.Series(0, index=routes_df.index)), errors="coerce") * 3600
+                        + pd.to_numeric(parts.get(1, pd.Series(0, index=routes_df.index)), errors="coerce") * 60
+                    )
+                    routes_df["_sk"] = secs.values
+                    routes_df = routes_df.sort_values("_sk", ascending=asc, na_position="last").drop(columns=["_sk"])
+                else:
+                    routes_df = routes_df.sort_values(sort_by, ascending=asc, na_position="last")
+            except Exception as sort_err:
+                logger.debug("Sort failed for %s: %s", sort_by, sort_err)
+
+        total = len(routes_df)
+        page  = routes_df.iloc[offset:offset + limit]
+
+        bool_cols = [c for c in page.columns if page[c].dtype == bool]
+        for c in bool_cols:
+            page = page.copy()
+            page[c] = page[c].astype(int)
+
+        return ApiResponse(
+            status="success",
+            data=page.to_dict("records"),
+            record_count=total,
+        )
 
     except Exception as e:
         logger.error(f"Error fetching routes: {e}")
@@ -332,8 +493,12 @@ async def get_operator_summary() -> ApiResponse:
 async def get_route_summary() -> ApiResponse:
     """Get route summary statistics."""
     try:
-        parquet_files = list(settings.GOLD_OUTPUT.glob("route_summary.parquet"))
+        with _routes_cache["lock"]:
+            cached_df = _routes_cache.get("df")
+        if cached_df is not None:
+            return ApiResponse(status="success", data=cached_df.to_dict("records"), record_count=len(cached_df))
 
+        parquet_files = list(settings.GOLD_OUTPUT.glob("route_summary.parquet"))
         if not parquet_files:
             return ApiResponse(status="success", data=[], record_count=0)
 
@@ -624,11 +789,165 @@ async def get_profile(file_name: str) -> ApiResponse:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ============= TIMETABLE =============
+
+@app.get("/routes/{route_id}/timetable")
+async def get_route_timetable(
+    route_id: str,
+    direction_id: int = Query(0, ge=0, le=1),
+) -> ApiResponse:
+    """
+    Return a timetable grid for one route: stops as rows, trips as columns.
+    Uses the in-memory silver cache pre-loaded at startup / after pipeline run.
+    """
+    try:
+        with _silver_cache["lock"]:
+            if not _silver_cache.get("loaded"):
+                return ApiResponse(status="success", data={"error": "cache_not_ready"}, record_count=0)
+            trips_df  = _silver_cache["trips"]
+            st_df_all = _silver_cache["stop_times"]
+            stops_df  = _silver_cache["stops"]
+            routes_df = _silver_cache["routes"]
+            cal_df    = _silver_cache["cal"]
+
+        # ── Filter trips ──────────────────────────────────────────
+        route_trips = trips_df[trips_df["route_id"] == route_id].copy()
+        route_trips["direction_id"] = route_trips["direction_id"].fillna(0).astype(int)
+        dir_trips = route_trips[route_trips["direction_id"] == direction_id]
+        if dir_trips.empty:
+            dir_trips = route_trips          # fall back if direction_id not in feed
+
+        trip_ids = dir_trips["trip_id"].tolist()
+        if not trip_ids:
+            return ApiResponse(status="success", data={}, record_count=0)
+
+        # ── Stop times for this set of trips ─────────────────────
+        st = st_df_all[st_df_all["trip_id"].isin(trip_ids)].copy()
+        st["stop_sequence"] = pd.to_numeric(st["stop_sequence"], errors="coerce").fillna(0).astype(int)
+
+        # Reference trip = the one covering the most stops
+        ref_trip = st.groupby("trip_id")["stop_id"].count().idxmax()
+        ref_stops = (
+            st[st["trip_id"] == ref_trip]
+            .sort_values("stop_sequence")[["stop_sequence", "stop_id"]]
+            .drop_duplicates("stop_id")
+        )
+
+        # ── Stop metadata ─────────────────────────────────────────
+        stops_idx = stops_df.set_index("stop_id")
+        stop_rows = []
+        for _, row in ref_stops.iterrows():
+            sid = row["stop_id"]
+            meta = stops_idx.loc[sid] if sid in stops_idx.index else {}
+            def _get(col):
+                return str(meta[col]) if hasattr(meta, "__getitem__") and col in meta.index else str(getattr(meta, col, ""))
+            raw = _get("stop_name") or sid
+            parts = raw.split(",", 1)
+            stop_rows.append({
+                "stop_sequence": int(row["stop_sequence"]),
+                "stop_id":       sid,
+                "stop_code":     _get("stop_code"),
+                "stop_name":     parts[0].strip(),
+                "stop_location": parts[1].strip() if len(parts) > 1 else parts[0].strip(),
+            })
+
+        # ── Trip columns sorted by first-stop departure ───────────
+        def _secs(t):
+            try:
+                p = str(t).split(":")
+                return int(p[0]) * 3600 + int(p[1]) * 60
+            except Exception:
+                return 999999
+
+        first_seq = ref_stops.iloc[0]["stop_sequence"]
+        first_times = st[st["stop_sequence"] == first_seq].set_index("trip_id")["departure_time"].to_dict()
+        headsign_map = dir_trips.set_index("trip_id")["trip_headsign"].to_dict()
+
+        # Per-trip service-day indicators using calendar
+        _DOW_SHORT = ["Mo","Tu","We","Th","Fr","Sa","Su"]
+        _DOW_FULL  = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]
+        svc_days_map: dict = {}
+        if not cal_df.empty:
+            for _, cr in cal_df.iterrows():
+                svc_days_map[cr["service_id"]] = [
+                    _DOW_SHORT[i] for i, d in enumerate(_DOW_FULL) if cr.get(d, 0)
+                ]
+        svc_by_trip = dir_trips.set_index("trip_id")["service_id"].to_dict() if "service_id" in dir_trips.columns else {}
+
+        trip_cols = []
+        for idx, tid in enumerate(sorted(trip_ids, key=lambda t: _secs(first_times.get(t, "99:99"))), start=1):
+            trip_st = st[st["trip_id"] == tid].set_index("stop_sequence")["departure_time"].to_dict()
+            times_by_seq = {}
+            for seq in ref_stops["stop_sequence"]:
+                raw_t = trip_st.get(seq)
+                if raw_t and str(raw_t) not in ("nan", "None", ""):
+                    p = str(raw_t).split(":")
+                    h = int(p[0]) % 24    # normalise >24h GTFS times
+                    times_by_seq[str(seq)] = f"{h:02d}:{p[1]}"
+                else:
+                    times_by_seq[str(seq)] = None
+            svc_id = svc_by_trip.get(tid, "")
+            trip_cols.append({
+                "trip_id":      tid,
+                "trip_num":     idx,
+                "headsign":     headsign_map.get(tid, ""),
+                "times":        times_by_seq,
+                "service_days": svc_days_map.get(svc_id, []),
+            })
+
+        # ── Days label ────────────────────────────────────────────
+        days_label = "—"
+        if not cal_df.empty and "service_id" in dir_trips.columns:
+            _DOW = ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"]
+            svc_cal = cal_df[cal_df["service_id"].isin(dir_trips["service_id"].unique())]
+            if not svc_cal.empty:
+                active = [d for d in _DOW if d in svc_cal.columns and svc_cal[d].max()]
+                mapping = {
+                    tuple("monday tuesday wednesday thursday friday saturday sunday".split()): "Monday – Sunday",
+                    tuple("monday tuesday wednesday thursday friday".split()):                "Monday – Friday",
+                    tuple("saturday sunday".split()):                                        "Saturday – Sunday",
+                    ("saturday",):                                                            "Saturday only",
+                    ("sunday",):                                                              "Sunday only",
+                }
+                days_label = mapping.get(tuple(active), ", ".join(d.capitalize() for d in active)) or "—"
+
+        # ── Route display names ───────────────────────────────────
+        r_row = routes_df[routes_df["route_id"] == route_id]
+        name_map = _agency_name_map()
+
+        def _val(col):
+            return str(r_row[col].iloc[0]) if not r_row.empty and col in r_row.columns else ""
+
+        agency_raw  = _val("agency_id") or _val("agency_name")
+        agency_name = name_map.get(agency_raw, agency_raw)
+
+        return ApiResponse(
+            status="success",
+            data={
+                "route_short_name": _val("route_short_name") or route_id,
+                "route_long_name":  _val("route_long_name"),
+                "agency_name":      agency_name,
+                "direction_id":     direction_id,
+                "days":             days_label,
+                "stops":            stop_rows,
+                "trips":            trip_cols,
+            },
+            record_count=len(trip_cols),
+        )
+
+    except Exception as e:
+        logger.error("Timetable error for route %s: %s", route_id, e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ============= PIPELINE =============
 
 @app.post("/pipeline/run")
-async def run_pipeline():
-    """Start the ingestion pipeline in the background."""
+async def run_pipeline(x_admin_token: Optional[str] = Header(default=None)):
+    """Start the ingestion pipeline. Requires admin token when PIPELINE_ADMIN_TOKEN is configured."""
+    required = settings.PIPELINE_ADMIN_TOKEN
+    if required and x_admin_token != required:
+        raise HTTPException(status_code=401, detail="Admin token required to run the pipeline")
     started = _start_pipeline_if_idle()
     if not started:
         raise HTTPException(status_code=409, detail="Pipeline is already running")
@@ -708,15 +1027,13 @@ async def disable_rule(rule_code: str):
 
 
 if __name__ == "__main__":
+    # Prefer: make dev   (uvicorn --reload, for development)
+    #         make serve (uvicorn, for production)
+    # This block is a convenience fallback only.
     import uvicorn
-
-    # Pipeline state is in-process; multiple workers would each have an independent
-    # copy of _pipeline_state. Force single worker unless explicitly set above 1 AND
-    # the user understands the limitation.
-    workers = settings.API_WORKERS if settings.API_WORKERS > 1 else 1
     uvicorn.run(
         "src.api.main:app",
         host=settings.API_HOST,
         port=settings.API_PORT,
-        workers=workers,
+        workers=settings.API_WORKERS,
     )

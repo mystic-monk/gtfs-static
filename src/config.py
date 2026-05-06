@@ -72,6 +72,7 @@ class Settings(BaseSettings):
     API_TITLE: str = Field(default="Irish GTFS Analytics API")
     API_VERSION: str = Field(default="0.1.0")
     API_WORKERS: int = Field(default=1)  # >1 workers splits in-process pipeline state
+    PIPELINE_ADMIN_TOKEN: str = Field(default="")  # empty = no auth; set a secret to protect /pipeline/run
 
     # Dashboard configuration
     DASHBOARD_THEME: str = Field(default="light")
