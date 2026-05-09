@@ -38,7 +38,7 @@ install:
 	pip install -e .[core,api]
 
 install-all:
-	pip install -e .[core,api,dashboard,etl,validation,remediation,monitoring,dev]
+	pip install -e .[core,api,etl,validation,remediation,monitoring,dev]
 
 # ── Running the app ─────────────────────────────────────────────────────────
 

@@ -36,37 +36,61 @@ Additional layers run alongside the pipeline:
 - Python 3.10+
 - Windows / Linux / macOS
 
-### Installation
+### 1 — Clone and create a virtual environment
 
 ```bash
 git clone <repository-url>
-cd gtfs-analytics-platform
-
-# Create and activate virtualenv
+cd gtfs
 python -m venv venv
-venv\Scripts\activate        # Windows CMD
-# venv\Scripts\Activate.ps1   # PowerShell
-# source venv/bin/activate     # Linux / macOS
+```
 
-# Install all dependencies
+Activate the environment:
+
+| Shell | Command |
+|-------|---------|
+| Windows CMD | `venv\Scripts\activate` |
+| PowerShell | `venv\Scripts\Activate.ps1` |
+| Linux / macOS | `source venv/bin/activate` |
+
+### 2 — Install dependencies
+
+```bash
 pip install -e .[core,api]
 ```
 
-### Running
+### 3 — Configure environment
 
 ```bash
-# Copy environment template and edit as needed
-cp .env.example .env
+# Windows CMD / PowerShell
+copy .env.example .env
 
-# Development (auto-reload on file changes)
-make dev
+# Linux / macOS
+cp .env.example .env
+```
+
+Edit `.env` if you need to change the port, feed URL, or other settings.  
+The defaults work out of the box — no changes are required for a first run.
+
+### 4 — Start the server
+
+**With `make` (Git Bash / WSL / Linux / macOS):**
+
+```bash
+make dev      # development — auto-reloads on file changes
+make serve    # production  — no reload
+```
+
+**Without `make` (Windows CMD / PowerShell):**
+
+```powershell
+# Development
+python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
 
 # Production
-make serve
-
-# Override host/port
-PORT=9000 make dev
+python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000
 ```
+
+Override the port by changing `8000` to your preferred value (or set `API_PORT` in `.env`).
 
 Open **http://localhost:8000** — the dashboard loads immediately.
 
@@ -112,28 +136,33 @@ Navigate to **http://localhost:8000/docs** for the full interactive Swagger UI.
 | `GET` | `/stats/route-summary` | Gold layer route summary |
 | `GET` | `/stats/operator-summary` | Per-operator aggregates |
 | `GET` | `/stats/headway` | Headway analysis per route/direction |
+| `GET` | `/stats/hourly-departures` | Departure counts by hour of day (0–23) |
+| `GET` | `/stats/headway-distribution` | Routes bucketed by average headway band |
 | `GET` | `/timetable/{route_id}` | Timetable for a route (trips, stops, service days) |
 | `GET` | `/validation/summary` | Latest validation report |
 | `GET` | `/rules` | All validation rules with metadata |
 | `GET` | `/monitoring/latest` | Latest quality metrics |
 | `GET` | `/monitoring/alerts` | Active monitoring alerts |
+| `GET` | `/monitoring/history` | Quality score history (last 90 runs by default) |
 | `GET` | `/pipeline/status` | Current pipeline run status |
 | `GET` | `/pipeline/schedule` | Next scheduled run time |
 
 ## Makefile Commands
 
+> `make` requires Git Bash, WSL, or a Unix environment. On Windows you can run the underlying commands directly (shown in parentheses).
+
 ```bash
-make install        # Install core + API dependencies
-make install-all    # Install all optional dependency groups
-make dev            # Start with --reload (development)
-make serve          # Start without --reload (production)
-make ingest         # Run the full ingestion pipeline manually
-make validate       # Run validation rule engine
-make remediate      # Run automated remediation engine
-make monitor        # Run monitoring and alerting layer
-make test           # Run tests with coverage
+make install        # pip install -e .[core,api]
+make install-all    # pip install -e .[core,api,dev,...]
+make dev            # uvicorn src.api.main:app --reload
+make serve          # uvicorn src.api.main:app
+make ingest         # python -m src.ingestion.pipeline
+make validate       # python -m src.validation.runner
+make remediate      # python -m src.remediation.engine
+make monitor        # python -m src.monitoring.monitor
+make test           # pytest -v --cov=src
 make lint           # flake8 + mypy
-make format         # Format code with black
+make format         # black src --line-length 100
 make clean          # Remove __pycache__ and pipeline output dirs
 ```
 
