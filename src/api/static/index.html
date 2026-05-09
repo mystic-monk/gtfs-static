@@ -111,6 +111,20 @@
       </div>
     </div>
 
+    <!-- Service patterns row -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+      <div class="bg-white rounded-xl shadow-sm p-6 border border-gray-100">
+        <h3 class="text-sm font-semibold text-gray-700 mb-1">Departures by Hour of Day</h3>
+        <p class="text-xs text-gray-400 mb-3">Total scheduled departures across all stops</p>
+        <div class="relative h-48"><canvas id="chart-hourly"></canvas></div>
+      </div>
+      <div class="bg-white rounded-xl shadow-sm p-6 border border-gray-100">
+        <h3 class="text-sm font-semibold text-gray-700 mb-1">Service Frequency</h3>
+        <p class="text-xs text-gray-400 mb-3">Routes by average headway between trips</p>
+        <div class="relative h-48"><canvas id="chart-headway-dist"></canvas></div>
+      </div>
+    </div>
+
     <!-- Validation summary row -->
     <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
       <div class="bg-white rounded-xl shadow-sm p-6 border border-gray-100">
@@ -136,12 +150,17 @@
     <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
       <div class="bg-white rounded-xl shadow-sm p-6 border border-gray-100">
         <h3 class="text-sm font-semibold text-gray-700 mb-4">Routes per Operator</h3>
-        <div class="relative h-64"><canvas id="chart-op-routes"></canvas></div>
+        <div class="relative h-56"><canvas id="chart-op-routes"></canvas></div>
       </div>
       <div class="bg-white rounded-xl shadow-sm p-6 border border-gray-100">
         <h3 class="text-sm font-semibold text-gray-700 mb-4">Trips per Operator</h3>
-        <div class="relative h-64"><canvas id="chart-op-trips"></canvas></div>
+        <div class="relative h-56"><canvas id="chart-op-trips"></canvas></div>
       </div>
+    </div>
+    <div class="bg-white rounded-xl shadow-sm p-6 border border-gray-100 mb-6">
+      <h3 class="text-sm font-semibold text-gray-700 mb-1">Active Service Days per Operator</h3>
+      <p class="text-xs text-gray-400 mb-3">Sum of calendar days each operator's services run — higher = more year-round coverage</p>
+      <div class="relative h-48"><canvas id="chart-op-service-days"></canvas></div>
     </div>
     <div class="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
       <div class="overflow-x-auto">
@@ -390,6 +409,12 @@
 
     <!-- ── Data Quality ───────────────────────────────────────── -->
     <div id="dmpane-quality" class="hidden">
+      <!-- Quality trend -->
+      <div class="bg-white rounded-xl shadow-sm p-6 border border-gray-100 mb-6">
+        <h3 class="text-sm font-semibold text-gray-700 mb-1">Quality Score Trend</h3>
+        <p class="text-xs text-gray-400 mb-3">% of records passing all critical validation rules across pipeline runs</p>
+        <div class="relative h-48"><canvas id="chart-quality-trend"></canvas></div>
+      </div>
       <!-- KPI row -->
       <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
         <div class="bg-white rounded-xl shadow-sm p-5 border border-gray-100">
@@ -598,9 +623,10 @@ async function loadHealth() {
 
 // ── Overview ───────────────────────────────────────────────────
 async function loadOverview() {
-  const [routes, stops, operators, valSummary] = await Promise.all([
+  const [routes, stops, operators, valSummary, hourly, hwDist] = await Promise.all([
     api('/stats/route-summary'), api('/stats/stop-activity'),
     api('/stats/operator-summary'), api('/validation/summary'),
+    api('/stats/hourly-departures'), api('/stats/headway-distribution'),
   ]);
 
   const hasData = routes?.length || stops?.length;
@@ -677,6 +703,40 @@ async function loadOverview() {
         <p class="text-xs text-gray-400 mt-0.5">${r.description}</p>
       </div>`).join('');
   }
+
+  // Departures by hour
+  if (hourly?.length) {
+    destroyChart('chart-hourly');
+    new Chart(document.getElementById('chart-hourly'), {
+      type: 'bar',
+      data: {
+        labels: hourly.map(h => h.hour + ':00'),
+        datasets: [{ label: 'Departures', data: hourly.map(h => h.departures),
+          backgroundColor: hourly.map(h => (h.hour >= 7 && h.hour <= 9) || (h.hour >= 17 && h.hour <= 19)
+            ? '#16a34a' : '#bbf7d0') }]
+      },
+      options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
+    });
+  }
+
+  // Service frequency distribution
+  if (hwDist?.length) {
+    destroyChart('chart-headway-dist');
+    new Chart(document.getElementById('chart-headway-dist'), {
+      type: 'bar',
+      data: {
+        labels: hwDist.map(d => d.bucket),
+        datasets: [{ label: 'Routes', data: hwDist.map(d => d.routes),
+          backgroundColor: ['#16a34a','#4ade80','#86efac','#fbbf24','#f87171'] }]
+      },
+      options: {
+        indexAxis: 'y',
+        plugins: { legend: { display: false },
+          tooltip: { callbacks: { label: ctx => ` ${ctx.raw} routes` } } },
+        scales: { x: { beginAtZero: true } }
+      }
+    });
+  }
 }
 
 // ── Operators ──────────────────────────────────────────────────
@@ -706,6 +766,12 @@ async function loadOperators() {
   new Chart(document.getElementById('chart-op-trips'), {
     type: 'bar',
     data: { labels: names, datasets: [{ label: 'Trips', data: data.map(o => o.total_trips || 0), backgroundColor: CHART_COLORS }] },
+    options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
+  });
+  destroyChart('chart-op-service-days');
+  new Chart(document.getElementById('chart-op-service-days'), {
+    type: 'bar',
+    data: { labels: names, datasets: [{ label: 'Service Days', data: data.map(o => o.active_service_days || 0), backgroundColor: '#818cf8' }] },
     options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
   });
 }
@@ -1207,8 +1273,9 @@ async function loadDmSchema() {
 }
 
 async function loadDmQuality() {
-  const [latest, alerts, valSummary] = await Promise.all([
-    api('/monitoring/latest'), api('/monitoring/alerts'), api('/validation/summary')
+  const [latest, alerts, valSummary, history] = await Promise.all([
+    api('/monitoring/latest'), api('/monitoring/alerts'), api('/validation/summary'),
+    api('/monitoring/history'),
   ]);
 
   if (!valSummary?.length) {
@@ -1320,6 +1387,40 @@ async function loadDmQuality() {
       <span class="text-xs w-24 text-right text-gray-500">${d.total.toLocaleString()} rows · ${pct.toFixed(1)}% clean</span>
     </div>`;
   }).join('');
+
+  // Quality score trend chart
+  if (history?.length) {
+    destroyChart('chart-quality-trend');
+    new Chart(document.getElementById('chart-quality-trend'), {
+      type: 'line',
+      data: {
+        labels: history.map(h => h.ingestion_date ?? ''),
+        datasets: [{
+          label: 'Quality Score %',
+          data: history.map(h => h.quality_score != null ? +parseFloat(h.quality_score).toFixed(1) : null),
+          borderColor: '#16a34a',
+          backgroundColor: 'rgba(22,163,74,0.08)',
+          tension: 0.3,
+          fill: true,
+          pointRadius: 3,
+          spanGaps: true,
+        }]
+      },
+      options: {
+        plugins: { legend: { display: false } },
+        scales: { y: { beginAtZero: false, min: 0, max: 100, ticks: { callback: v => v + '%' } } }
+      }
+    });
+  } else {
+    const el = document.getElementById('chart-quality-trend');
+    if (el) {
+      const ctx = el.getContext('2d');
+      ctx.font = '13px sans-serif';
+      ctx.fillStyle = '#9ca3af';
+      ctx.textAlign = 'center';
+      ctx.fillText('Trend data will appear after multiple pipeline runs', el.width / 2, el.height / 2);
+    }
+  }
 }
 
 async function loadDmRules() {

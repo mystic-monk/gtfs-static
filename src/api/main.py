@@ -80,13 +80,15 @@ def _load_silver_cache() -> None:
         stops  = sorted(silver.glob("stops_ingestion_date=*.parquet"))
         routes = sorted(silver.glob("routes_ingestion_date=*.parquet"))
         cal    = sorted(silver.glob("calendar_ingestion_date=*.parquet"))
+        agency = sorted(silver.glob("agency_ingestion_date=*.parquet"))
         if not (trips and st and stops and routes):
             return
         with _silver_cache["lock"]:
             _silver_cache["trips"]  = pd.read_parquet(trips[-1])
-            _silver_cache["stops"]  = pd.read_parquet(stops[-1])
+            _silver_cache["stops"]  = pd.read_parquet(stops[-1], columns=["stop_id", "stop_name", "stop_lat", "stop_lon", "stop_code"])
             _silver_cache["routes"] = pd.read_parquet(routes[-1])
             _silver_cache["cal"]    = pd.read_parquet(cal[-1]) if cal else pd.DataFrame()
+            _silver_cache["agency"] = pd.read_parquet(agency[-1], columns=["agency_id", "agency_name"]) if agency else pd.DataFrame()
             # stop_times is large — load only needed columns
             _silver_cache["stop_times"] = pd.read_parquet(
                 st[-1], columns=["trip_id", "stop_id", "stop_sequence", "departure_time"]
@@ -264,21 +266,20 @@ def _build_routes_cache() -> None:
 
         routes_df = pd.read_parquet(parquet_files[0])
 
-        # Agency names from silver cache (already in memory)
+        # Agency names — use silver cache if available, otherwise read from disk once
         with _silver_cache["lock"]:
-            agency_loaded = _silver_cache.get("loaded", False)
-            if agency_loaded and "stops" in _silver_cache:
-                # Rebuild agency map from in-memory silver
-                try:
-                    silver_files = sorted(settings.SILVER_OUTPUT.glob("agency_ingestion_date=*.parquet"))
-                    if silver_files:
-                        ag = pd.read_parquet(silver_files[-1], columns=["agency_id", "agency_name"])
-                        name_map = dict(zip(ag["agency_id"].astype(str), ag["agency_name"].astype(str)))
-                    else:
-                        name_map = {}
-                except Exception:
+            ag_cached = _silver_cache.get("agency")
+        if ag_cached is not None:
+            name_map = dict(zip(ag_cached["agency_id"].astype(str), ag_cached["agency_name"].astype(str)))
+        else:
+            try:
+                silver_files = sorted(settings.SILVER_OUTPUT.glob("agency_ingestion_date=*.parquet"))
+                if silver_files:
+                    ag = pd.read_parquet(silver_files[-1], columns=["agency_id", "agency_name"])
+                    name_map = dict(zip(ag["agency_id"].astype(str), ag["agency_name"].astype(str)))
+                else:
                     name_map = {}
-            else:
+            except Exception:
                 name_map = {}
 
         if name_map and "agency_name" in routes_df.columns:
@@ -535,6 +536,51 @@ async def get_stop_activity() -> ApiResponse:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/stats/hourly-departures")
+async def get_hourly_departures() -> ApiResponse:
+    """Departure counts by hour of day (0-23) from the gold layer."""
+    try:
+        pf = list(settings.GOLD_OUTPUT.glob("hourly_departures.parquet"))
+        if pf:
+            df = pd.read_parquet(pf[0])
+            return ApiResponse(status="success", data=df.to_dict("records"), record_count=len(df))
+        # Fallback: compute live from silver cache
+        with _silver_cache["lock"]:
+            if not _silver_cache.get("loaded"):
+                return ApiResponse(status="success", data=[], record_count=0)
+            st = _silver_cache["stop_times"][["departure_time"]].copy()
+        parts = st["departure_time"].astype(str).str.split(":", n=1, expand=True)
+        hours = pd.to_numeric(parts[0], errors="coerce") % 24
+        counts = (
+            hours.dropna().astype(int).value_counts()
+            .reindex(range(24), fill_value=0).sort_index()
+            .reset_index()
+        )
+        counts.columns = ["hour", "departures"]
+        return ApiResponse(status="success", data=counts.to_dict("records"), record_count=24)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/stats/headway-distribution")
+async def get_headway_distribution() -> ApiResponse:
+    """Route counts bucketed by average headway band."""
+    try:
+        pf = list(settings.GOLD_OUTPUT.glob("headway_analysis.parquet"))
+        if not pf:
+            return ApiResponse(status="success", data=[], record_count=0)
+        df = pd.read_parquet(pf[0], columns=["route_id", "avg_headway_minutes"])
+        df = df.drop_duplicates("route_id")
+        bins   = [0, 10, 20, 30, 60, float("inf")]
+        labels = ["< 10 min", "10–20 min", "20–30 min", "30–60 min", "> 60 min"]
+        df["bucket"] = pd.cut(df["avg_headway_minutes"], bins=bins, labels=labels, right=False)
+        counts = df["bucket"].value_counts().reindex(labels, fill_value=0)
+        data = [{"bucket": b, "routes": int(c)} for b, c in counts.items()]
+        return ApiResponse(status="success", data=data, record_count=len(data))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/stats/headway")
 async def get_headway_analysis() -> ApiResponse:
     """Get headway analysis."""
@@ -698,29 +744,32 @@ async def get_latest_monitoring() -> ApiResponse:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+_HISTORY_COLS = ["ingestion_date", "quality_score", "total_records_ingested", "total_critical_violations"]
+
 @app.get("/monitoring/history")
 async def get_monitoring_history(
-    limit: int = Query(100, ge=1, le=10000),
+    limit: int = Query(90, ge=1, le=365),
 ) -> ApiResponse:
-    """Get monitoring history."""
+    """Get monitoring history — reads only the most recent files needed to fill limit."""
     try:
-        parquet_files = list(settings.MONITORING_OUTPUT.glob("monitoring_log_date=*.parquet"))
-        
-        if parquet_files:
-            all_records = []
-            for pf in sorted(parquet_files):
-                df = read_parquet(pf)
-                all_records.extend(df.to_dict("records"))
-            
-            records_limited = all_records[-limit:]
-            
-            return ApiResponse(
-                status="success",
-                data=records_limited,
-                record_count=len(records_limited),
-            )
-        else:
+        parquet_files = sorted(settings.MONITORING_OUTPUT.glob("monitoring_log_date=*.parquet"))
+        if not parquet_files:
             return ApiResponse(status="success", data=[], record_count=0)
+
+        chunks: list = []
+        for pf in reversed(parquet_files):
+            cols = [c for c in _HISTORY_COLS if True]  # read subset
+            try:
+                df = pd.read_parquet(pf, columns=_HISTORY_COLS)
+            except Exception:
+                df = pd.read_parquet(pf)
+            chunks.insert(0, df)
+            if sum(len(c) for c in chunks) >= limit:
+                break
+
+        combined = pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
+        result = combined.tail(limit)
+        return ApiResponse(status="success", data=result.to_dict("records"), record_count=len(result))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

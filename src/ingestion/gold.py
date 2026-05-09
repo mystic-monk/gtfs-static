@@ -15,6 +15,19 @@ from src.utils.date_utils import get_active_service_dates, format_gtfs_date
 
 logger = setup_logging(__name__)
 
+_DOW = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+
+
+def _service_days_series(calendar_df: pd.DataFrame) -> "pd.Series":
+    """Return active-day count per row in calendar_df (same index). Avoids repeated apply()."""
+    return calendar_df.apply(
+        lambda r: get_active_service_dates(
+            r["start_date"], r["end_date"],
+            {d: r.get(d, 0) for d in _DOW},
+        ),
+        axis=1,
+    )
+
 
 class GoldLayer:
     """
@@ -55,16 +68,9 @@ class GoldLayer:
             .reset_index(name="total_stops")
         )
         
-        # Count active service days per route — vectorized: compute per service_id once
-        _DOW = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+        # Count active service days per route
         cal_days = calendar_df.copy()
-        cal_days["_service_days"] = cal_days.apply(
-            lambda r: get_active_service_dates(
-                r["start_date"], r["end_date"],
-                {d: r.get(d, 0) for d in _DOW}
-            ),
-            axis=1,
-        )
+        cal_days["_service_days"] = _service_days_series(calendar_df)
         route_services = (
             trips_df[["route_id", "service_id"]]
             .drop_duplicates()
@@ -175,17 +181,8 @@ class GoldLayer:
             .reset_index(name="total_trips")
         )
         
-        # Count active service days — vectorized
-        _DOW2 = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-        active_days = calendar_df.apply(
-            lambda r: get_active_service_dates(
-                r["start_date"], r["end_date"],
-                {d: r.get(d, 0) for d in _DOW2}
-            ),
-            axis=1,
-        )
         service_days = calendar_df[["service_id"]].copy()
-        service_days["active_days"] = active_days
+        service_days["active_days"] = _service_days_series(calendar_df)
         
         # Link services to agencies through trips and routes
         trips_with_agency = trips_df.merge(
@@ -291,19 +288,31 @@ class GoldLayer:
         coverage["start_date"] = coverage["start_date"].apply(lambda x: format_gtfs_date(x) if x else None)
         coverage["end_date"] = coverage["end_date"].apply(lambda x: format_gtfs_date(x) if x else None)
         
-        # Calculate total active days — vectorized
-        _DOW3 = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-        coverage["total_active_days"] = calendar_df.apply(
-            lambda r: get_active_service_dates(
-                r["start_date"], r["end_date"],
-                {d: r.get(d, 0) for d in _DOW3}
-            ),
-            axis=1,
-        )
+        coverage["total_active_days"] = _service_days_series(calendar_df)
         
         logger.info(f"Created calendar_coverage: {len(coverage)} service ids")
         return coverage
     
+    def create_hourly_departures(self, stop_times_df: pd.DataFrame) -> pd.DataFrame:
+        """Departure count by hour of day (0-23) — used for the hourly chart."""
+        try:
+            parts = stop_times_df["departure_time"].astype(str).str.split(":", n=1, expand=True)
+            hours = pd.to_numeric(parts[0], errors="coerce") % 24
+            counts = (
+                hours.dropna()
+                .astype(int)
+                .value_counts()
+                .reindex(range(24), fill_value=0)
+                .sort_index()
+                .reset_index()
+            )
+            counts.columns = ["hour", "departures"]
+            logger.info("Created hourly_departures: 24 hour buckets")
+            return counts
+        except Exception as e:
+            logger.error("create_hourly_departures failed: %s", e)
+            return pd.DataFrame({"hour": range(24), "departures": 0})
+
     def create_gold_tables(
         self,
         silver_dfs: Dict[str, pd.DataFrame],
@@ -355,6 +364,11 @@ class GoldLayer:
         if "calendar" in silver_dfs:
             gold["calendar_coverage"] = self.create_calendar_coverage(
                 silver_dfs["calendar"],
+            )
+
+        if "stop_times" in silver_dfs:
+            gold["hourly_departures"] = self.create_hourly_departures(
+                silver_dfs["stop_times"],
             )
         
         self.gold_tables = gold
