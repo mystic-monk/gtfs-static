@@ -3,6 +3,7 @@ FastAPI backend for the Irish GTFS Analytics Platform.
 
 Exposes analytics and quality metrics via REST API endpoints.
 """
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Query, Header
 from fastapi.responses import FileResponse, RedirectResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -154,16 +155,9 @@ def _scheduler_loop() -> None:
 # Pre-warm silver cache on startup (non-blocking)
 threading.Thread(target=_load_silver_cache, daemon=True).start()
 
-# Create FastAPI app
-app = FastAPI(
-    title=settings.API_TITLE,
-    version=settings.API_VERSION,
-    description="Irish GTFS Analytics and Quality Platform API",
-)
 
-
-@app.on_event("startup")
-async def _on_startup():
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
     # Auto-run pipeline on first boot if no gold data exists yet
     gold_exists = any(settings.GOLD_OUTPUT.glob("route_summary.parquet"))
     if not gold_exists:
@@ -174,6 +168,17 @@ async def _on_startup():
 
     # Start daily refresh scheduler in background
     threading.Thread(target=_scheduler_loop, daemon=True).start()
+
+    yield
+
+
+# Create FastAPI app
+app = FastAPI(
+    title=settings.API_TITLE,
+    version=settings.API_VERSION,
+    description="Irish GTFS Analytics and Quality Platform API",
+    lifespan=_lifespan,
+)
 
 _STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")

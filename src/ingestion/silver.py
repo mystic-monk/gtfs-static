@@ -120,7 +120,10 @@ class SilverLayer:
         # Standardize column types
         df["trip_id"] = df["trip_id"].astype(str).str.strip()
         df["stop_id"] = df["stop_id"].astype(str).str.strip()
-        df["stop_sequence"] = pd.to_numeric(df["stop_sequence"], errors="coerce")
+        # int32 — this is by far the largest table in a country-wide feed, so
+        # downcasting from the pandas default int64/float64 meaningfully cuts
+        # peak memory at no loss (GTFS sequence/enum values fit easily).
+        df["stop_sequence"] = pd.to_numeric(df["stop_sequence"], errors="coerce").astype("Int32")
         # Vectorized: strip whitespace, keep HH:MM:SS as-is (GTFS allows hours >= 24)
         for col in ("arrival_time", "departure_time"):
             df[col] = (
@@ -128,9 +131,9 @@ class SilverLayer:
                 .where(df[col].notna() & (df[col].astype(str).str.strip() != "nan"), other=None)
             )
         df["stop_headsign"] = df["stop_headsign"].fillna("")
-        df["pickup_type"] = pd.to_numeric(df["pickup_type"], errors="coerce").fillna(0)
-        df["drop_off_type"] = pd.to_numeric(df["drop_off_type"], errors="coerce").fillna(0)
-        
+        df["pickup_type"] = pd.to_numeric(df["pickup_type"], errors="coerce").fillna(0).astype("int8")
+        df["drop_off_type"] = pd.to_numeric(df["drop_off_type"], errors="coerce").fillna(0).astype("int8")
+
         logger.info(f"Standardized stop_times: {len(df)} records")
         return df
     
@@ -196,13 +199,15 @@ class SilverLayer:
             return df
         
         df = df.copy()
-        
-        # Standardize column types
+
+        # Standardize column types — float32/int32 halve memory vs. the pandas
+        # default float64/int64; shapes.txt is the second-largest table in a
+        # country-wide feed and GTFS coordinate precision fits float32 easily.
         df["shape_id"] = df["shape_id"].astype(str).str.strip()
-        df["shape_pt_lat"] = pd.to_numeric(df["shape_pt_lat"], errors="coerce")
-        df["shape_pt_lon"] = pd.to_numeric(df["shape_pt_lon"], errors="coerce")
-        df["shape_pt_sequence"] = pd.to_numeric(df["shape_pt_sequence"], errors="coerce")
-        
+        df["shape_pt_lat"] = pd.to_numeric(df["shape_pt_lat"], errors="coerce").astype("float32")
+        df["shape_pt_lon"] = pd.to_numeric(df["shape_pt_lon"], errors="coerce").astype("float32")
+        df["shape_pt_sequence"] = pd.to_numeric(df["shape_pt_sequence"], errors="coerce").astype("Int32")
+
         logger.info(f"Standardized shapes: {len(df)} records")
         return df
     

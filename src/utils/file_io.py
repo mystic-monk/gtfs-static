@@ -1,7 +1,6 @@
 """
 File I/O utilities for the Irish GTFS Analytics Platform.
 """
-import io
 import zipfile
 from pathlib import Path
 from typing import Optional, Dict, List
@@ -91,14 +90,17 @@ def write_csv(df: pd.DataFrame, path: Path, index: bool = False, **kwargs) -> No
 def extract_gtfs_zip(zip_path: Path, extract_to: Path) -> Dict[str, pd.DataFrame]:
     """
     Extract and parse all GTFS text files from a zip archive.
-    
+
     Args:
         zip_path: Path to GTFS zip file
         extract_to: Directory to extract files to
-        
+
     Returns:
         Dictionary mapping filename (without .txt) to DataFrame
     """
+    # fare_attributes.txt / fare_rules.txt / feed_info.txt are not consumed by
+    # any validation rule, Silver transform, or Gold table — skip parsing them
+    # entirely to avoid the memory cost of frames nothing downstream reads.
     expected_files = {
         "agency.txt",
         "stops.txt",
@@ -108,38 +110,36 @@ def extract_gtfs_zip(zip_path: Path, extract_to: Path) -> Dict[str, pd.DataFrame
         "calendar.txt",
         "calendar_dates.txt",
         "shapes.txt",
-        "fare_attributes.txt",
-        "fare_rules.txt",
-        "feed_info.txt",
     }
-    
+
     dfs = {}
     extract_to.mkdir(parents=True, exist_ok=True)
-    
+
     try:
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
             # List all files in zip
             available_files = set(zip_ref.namelist())
-            
-            # Extract and read each file
+
+            # Extract and read each file directly from the zip's binary stream —
+            # avoids materialising a second full copy as a decoded Python str
+            # (io.StringIO) before pandas gets to parse it.
             for gtfs_file in expected_files:
                 if gtfs_file in available_files:
                     with zip_ref.open(gtfs_file) as f:
-                        content = f.read().decode("utf-8")
-                        df = pd.read_csv(io.StringIO(content), dtype=str, keep_default_na=False)
+                        df = pd.read_csv(f, dtype=str, keep_default_na=False, encoding="utf-8")
                         key = gtfs_file.replace(".txt", "")
                         dfs[key] = df
                         logger.info(f"Extracted {gtfs_file}: {len(df)} rows")
                 else:
                     logger.warning(f"File {gtfs_file} not found in zip")
-    
+
     except zipfile.BadZipFile:
         logger.error(f"Invalid zip file: {zip_path}")
         raise
     except Exception as e:
         logger.error(f"Error extracting {zip_path}: {e}")
         raise
-    
+
     return dfs
 
 

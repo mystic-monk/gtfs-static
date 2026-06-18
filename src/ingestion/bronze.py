@@ -10,7 +10,6 @@ import logging
 from typing import Dict, Optional, Tuple
 from pathlib import Path
 from datetime import datetime
-from io import BytesIO
 import tempfile
 
 from src.config import settings
@@ -43,25 +42,29 @@ class BronzeLayer:
         """
         try:
             logger.info(f"Downloading GTFS feed for {operator_name} from {feed_url}")
-            
-            response = requests.get(feed_url, timeout=30)
-            response.raise_for_status()
-            
+
             # Extract zip to temporary directory
             with tempfile.TemporaryDirectory() as tmpdir:
                 tmppath = Path(tmpdir)
-                
-                # Write zip content
                 zip_path = tmppath / "feed.zip"
-                with open(zip_path, "wb") as f:
-                    f.write(response.content)
-                
+
+                # Stream the download straight to disk in chunks — avoids holding
+                # the entire zip body in memory via response.content (matters on
+                # memory-constrained hosts; the combined feed can be tens of MB).
+                with requests.get(feed_url, timeout=30, stream=True) as response:
+                    response.raise_for_status()
+                    with open(zip_path, "wb") as f:
+                        for chunk in response.iter_content(chunk_size=1024 * 1024):
+                            if chunk:
+                                f.write(chunk)
+
                 # Extract GTFS files
                 gtfs_dfs = extract_gtfs_zip(zip_path, tmppath)
-                
+                self._apply_sample_size(gtfs_dfs)
+
                 logger.info(f"Successfully downloaded and extracted GTFS feed for {operator_name}")
                 return gtfs_dfs
-        
+
         except requests.RequestException as e:
             logger.error(f"Failed to download GTFS feed for {operator_name}: {e}")
             logger.info(f"Attempting to use sample data instead...")
@@ -69,7 +72,29 @@ class BronzeLayer:
         except Exception as e:
             logger.error(f"Error processing GTFS feed for {operator_name}: {e}")
             return None
-    
+
+    @staticmethod
+    def _apply_sample_size(gtfs_dfs: Dict[str, pd.DataFrame]) -> None:
+        """
+        Cap the largest fact tables at settings.SAMPLE_SIZE rows, in place.
+
+        Only stop_times and shapes are truncated — they dominate memory in a
+        country-wide combined feed. Dimension tables (agency, routes, trips,
+        stops, calendar) are left intact so referential integrity holds; a
+        truncated stop_times simply joins against fewer rows, it doesn't
+        orphan anything. Intended as a low-memory dial for constrained hosts
+        (e.g. Render's free 512Mi tier) — set SAMPLE_SIZE in the environment.
+        """
+        if not settings.SAMPLE_SIZE:
+            return
+        for key in ("stop_times", "shapes"):
+            df = gtfs_dfs.get(key)
+            if df is not None and len(df) > settings.SAMPLE_SIZE:
+                logger.info(
+                    f"SAMPLE_SIZE={settings.SAMPLE_SIZE} set — truncating {key} from {len(df)} rows"
+                )
+                gtfs_dfs[key] = df.iloc[: settings.SAMPLE_SIZE].copy()
+
     def _load_sample_data(self) -> Optional[Dict[str, pd.DataFrame]]:
         """
         Load sample GTFS data for testing when real feeds are not available.

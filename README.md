@@ -185,7 +185,7 @@ Copy `.env.example` to `.env` and edit. All settings can also be set as environm
 | `FEED_STALENESS_DAYS` | `7` | Days until no future service triggers staleness alert |
 | `BATCH_SIZE` | `10000` | Rows per processing batch |
 | `MAX_WORKERS` | `4` | Thread pool size for parallel pipeline steps |
-| `SAMPLE_SIZE` | _(unset)_ | Limit rows processed — useful for smoke tests |
+| `SAMPLE_SIZE` | _(unset)_ | Caps `stop_times`/`shapes` at N rows during ingestion — use on memory-constrained hosts |
 | `LOG_LEVEL` | `INFO` | Logging verbosity |
 
 ## Project Structure
@@ -299,8 +299,8 @@ The platform falls back to built-in sample data automatically. Check `logs/gtfs.
 **API returns empty arrays**
 Run `make ingest` to populate `outputs/gold/`.
 
-**Memory errors with large feeds**
-Reduce `BATCH_SIZE` in `.env` or set `SAMPLE_SIZE` to a row limit for development.
+**Memory errors with large feeds / deploying on Render's free tier (512Mi)**
+The combined TFI feed covers every Irish operator, so `stop_times` and `shapes` can run into the millions of rows. If the pipeline OOMs during the first boot run, set `SAMPLE_SIZE` (e.g. `SAMPLE_SIZE=300000`) as an environment variable — it caps `stop_times`/`shapes` at that many rows during ingestion while keeping all other GTFS files complete, so routes/stops/operators stay accurate, just with fewer scheduled trips. Unset it (or raise it) once you've moved to a host with more memory.
 
 **Multiple workers cause inconsistent state**
 Keep `API_WORKERS=1`. Pipeline status and the Silver cache are in-process; multiple workers give independent copies. Move state to Redis before scaling workers.

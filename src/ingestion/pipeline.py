@@ -3,6 +3,7 @@ Main pipeline orchestrator for the Irish GTFS Analytics Platform.
 
 Coordinates the execution of all layers: Bronze -> Quarantine -> Silver -> Gold -> Profiles.
 """
+import gc
 import logging
 from typing import Dict, Optional
 from pathlib import Path
@@ -67,12 +68,23 @@ def run_full_pipeline(
             "quarantined_records": len(quarantine_df),
             "validation_summary": validation_summary.to_dict("records") if validation_summary is not None else [],
         }
-        
+
+        # bronze_dfs has been superseded by validated_dfs — drop the reference so
+        # this full generation of the raw feed can be freed before Silver runs.
+        # Without this, raw + validated + silver copies of the largest tables
+        # (stop_times, shapes) are all resident simultaneously, which is what
+        # pushes memory-constrained hosts (e.g. Render's 512Mi tier) into OOM.
+        del bronze_dfs
+        gc.collect()
+
         # ============= SILVER LAYER =============
         logger.info("=== SILVER LAYER: Cleaned Data ===")
         silver_dfs = transform_to_silver_layer(validated_dfs)
         results["silver"] = {"record_count": sum(len(df) for df in silver_dfs.values())}
-        
+
+        del validated_dfs
+        gc.collect()
+
         # ============= GOLD LAYER =============
         logger.info("=== GOLD LAYER: Analytics Aggregates ===")
         gold_tables = create_gold_layer(silver_dfs)
